@@ -3,11 +3,13 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +77,9 @@ func (f *fakeTG) handler(w http.ResponseWriter, r *http.Request) {
 	case "sendMessage", "editMessageText":
 		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
 		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["text"], Markup: form["reply_markup"]})
+	case "sendPhoto", "sendVideo":
+		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
+		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["caption"]})
 	case "answerCallbackQuery":
 		f.answers = append(f.answers, form["text"])
 	case "getFile":
@@ -144,8 +149,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	srv := httptest.NewServer(http.HandlerFunc(tg.handler))
 	t.Cleanup(srv.Close)
 
+	tasks := service.NewTasks(store)
 	app := New(Services{
-		Access: access, Scenarios: service.NewScenarios(store), Tasks: service.NewTasks(store), Dialog: service.NewDialog(store),
+		Access: access, Scenarios: service.NewScenarios(store), Tasks: tasks, Dialog: service.NewDialog(store),
+		Promos: service.NewPromos(store), Reports: service.NewReports(store, tasks), PromoLowThreshold: 2,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.UTC)
 	b, err := bot.New("123:TEST",
 		bot.WithSkipGetMe(), bot.WithServerURL(srv.URL), bot.WithNotAsyncHandlers(),
@@ -343,5 +350,195 @@ func TestDeclineNeedsConfirmation(t *testing.T) {
 	e.click(2000, "tsk:dy:1")
 	if got := e.tg.last(); !strings.Contains(got, "отказ") {
 		t.Fatalf("после подтверждения: %q", got)
+	}
+}
+
+// say отправляет текстовое сообщение от имени пользователя.
+func (e *testEnv) say(from int64, text string) {
+	e.b.ProcessUpdate(context.Background(), msg(from, text))
+}
+
+// sendPhoto имитирует отправку фото (Telegram присылает несколько размеров).
+func (e *testEnv) sendPhoto(from int64, id string) {
+	e.b.ProcessUpdate(context.Background(), &models.Update{ID: 1, Message: &models.Message{
+		ID: 3, From: &models.User{ID: from, FirstName: "Тест"}, Chat: models.Chat{ID: from, Type: models.ChatTypePrivate},
+		Photo: []models.PhotoSize{{FileID: id + "-small", FileUniqueID: id + "-u1"}, {FileID: id, FileUniqueID: id + "-u"}},
+	}})
+}
+
+var dataRe = regexp.MustCompile(`"callback_data":"([^"]+)"`)
+
+// press нажимает первую кнопку последнего сообщения чату, чьи данные начинаются с prefix и оканчиваются на suffix.
+func (e *testEnv) press(t *testing.T, chat int64, prefix, suffix string) {
+	t.Helper()
+	m, ok := e.tg.lastTo(chat)
+	if !ok {
+		t.Fatalf("нет сообщений для %d", chat)
+	}
+	for _, sub := range dataRe.FindAllStringSubmatch(m.Markup, -1) {
+		if strings.HasPrefix(sub[1], prefix) && strings.HasSuffix(sub[1], suffix) {
+			e.click(chat, sub[1])
+			return
+		}
+	}
+	t.Fatalf("в последнем сообщении нет кнопки %s*%s: %q %s", prefix, suffix, m.Text, m.Markup)
+}
+
+const reportFlowScenario = `key: report-flow
+title: Полный отчёт
+operator: BTS
+steps: [Шаг]
+questions:
+  - {key: rate, text: Оценка сервиса, type: rating}
+  - {key: yn, text: Проверили документ, type: yesno}
+  - {key: photo, text: Фото посылки, type: photo}
+  - {key: note, text: Комментарий, type: text, required: false}
+`
+
+// Полный путь этапа 3: промокоды, выдача при принятии, предупреждение о нехватке,
+// мастер отчёта с компенсацией, просмотр и выплата админом.
+func TestPromoReportCompensationFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.addBuyer(t, 2001, "Борис")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+
+	// Загрузка промокодов текстом и файлом.
+	e.click(testAdmin, "adm:pra")
+	e.say(testAdmin, "AAA111\nBBB222\nCCC333")
+	if got := e.tg.last(); !strings.Contains(got, "Добавлено кодов: <b>3</b>") {
+		t.Fatalf("загрузка текстом: %q", got)
+	}
+	e.upload(testAdmin, "codes.csv", "code,note\nDDD444,x\nAAA111,повтор")
+	if got := e.tg.last(); !strings.Contains(got, "Добавлено кодов: <b>1</b>") || !strings.Contains(got, "повторов: 1") {
+		t.Fatalf("загрузка файлом: %q", got)
+	}
+
+	assign := func(user int64) {
+		for _, d := range []string{"adm:as:0", "adm:as:s:1", "adm:as:d:3", fmt.Sprintf("adm:as:t:%d:0", user), "adm:as:go"} {
+			e.click(testAdmin, d)
+		}
+	}
+	// Первое принятие: выдан AAA111, остаток 3, предупреждения нет.
+	assign(2000)
+	e.click(2000, "tsk:ac:1")
+	if got := e.tg.last(); !strings.Contains(got, "AAA111") {
+		t.Fatalf("промокод не показан покупателю: %q", got)
+	}
+	// Второе принятие: остаток 2 = порогу, админ получает предупреждение.
+	assign(2001)
+	e.click(2001, "tsk:ac:2")
+	if got := e.tg.last(); !strings.Contains(got, "BBB222") {
+		t.Fatalf("второй код: %q", got)
+	}
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Text, "осталось: <b>2</b>") {
+		t.Fatalf("нет предупреждения о нехватке: %q", m.Text)
+	}
+
+	// Мастер отчёта.
+	e.click(2000, "tsk:rp:1")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Вопрос 1 из 4") {
+		t.Fatalf("первый вопрос: %q", m.Text)
+	}
+	staleData := ""
+	if m, _ := e.tg.lastTo(2000); true {
+		staleData = dataRe.FindStringSubmatch(m.Markup)[1] // кнопка первого шага
+	}
+	e.press(t, 2000, "rpt:r:", ":5")
+	e.click(2000, staleData) // устаревшая кнопка
+	if got := e.tg.lastAnswer(); got != "Эта кнопка устарела." {
+		t.Fatalf("устаревшая кнопка: %q", got)
+	}
+	e.press(t, 2000, "rpt:y:", ":yes")
+	e.say(2000, "просто текст") // ждём фото
+	if got := e.tg.last(); !strings.Contains(got, "Жду фото") {
+		t.Fatalf("ожидание фото: %q", got)
+	}
+	e.sendPhoto(2000, "PHOTO1")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Вопрос 4 из 4") || !strings.Contains(m.Text, "необязательный") {
+		t.Fatalf("четвёртый вопрос: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:s:", "") // пропустить необязательный
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Компенсация") {
+		t.Fatalf("вопрос о компенсации: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:ca:", ":1")
+	e.say(2000, "много")
+	if got := e.tg.last(); !strings.Contains(got, "Не понял сумму") {
+		t.Fatalf("неверная сумма: %q", got)
+	}
+	e.say(2000, "150 000")
+	e.sendPhoto(2000, "RECEIPT1")
+	m, _ := e.tg.lastTo(2000)
+	if !strings.Contains(m.Text, "Проверьте отчёт") || !strings.Contains(m.Text, "150 000 сум") || !strings.Contains(m.Text, "пропущено") {
+		t.Fatalf("итоговый экран: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:ok:", "")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Отчёт отправлен") {
+		t.Fatalf("после отправки: %q", m.Text)
+	}
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Text, "Получен отчёт") || !strings.Contains(m.Text, "150 000 сум") {
+		t.Fatalf("админ не получил отчёт: %q", m.Text)
+	}
+	// Повторно отправить нельзя.
+	e.click(2000, "tsk:rp:1")
+	if got := e.tg.lastAnswer(); got != "Отчёт по этому заданию уже отправлен." {
+		t.Fatalf("повторный отчёт: %q", got)
+	}
+
+	// Админ смотрит отчёт (текст + фото) и компенсацию.
+	e.click(testAdmin, "adm:rv:1")
+	if got := e.tg.last(); !strings.Contains(got, "Оценка сервиса") || !strings.Contains(got, "<b>5</b>") || !strings.Contains(got, "да") {
+		t.Fatalf("экран отчёта: %q", got)
+	}
+	e.click(testAdmin, "adm:cp:w:0")
+	if got := e.tg.last(); !strings.Contains(got, "150 000 сум") {
+		t.Fatalf("список компенсаций: %q", got)
+	}
+	e.click(testAdmin, "adm:cc:1")
+	if m, _ := e.tg.lastTo(testAdmin); m.Method != "editMessageText" && m.Method != "sendPhoto" {
+		t.Fatalf("метод: %s", m.Method)
+	}
+	e.click(testAdmin, "adm:cpd:1")
+	if got := e.tg.last(); !strings.Contains(got, "Подтвердите") {
+		t.Fatalf("нет подтверждения выплаты: %q", got)
+	}
+	e.click(testAdmin, "adm:cpy:1")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "выплачена") {
+		t.Fatalf("покупатель не уведомлён о выплате: %q", m.Text)
+	}
+	e.click(testAdmin, "adm:cp:w:0")
+	if got := e.tg.last(); !strings.Contains(got, "Записей: 0") {
+		t.Fatalf("после выплаты список к выплате должен быть пуст: %q", got)
+	}
+	// Задание можно отметить проверенным.
+	e.click(testAdmin, "adm:rv:1:ok")
+	e.click(testAdmin, "adm:tc:1")
+	if got := e.tg.last(); !strings.Contains(got, "проверено") {
+		t.Fatalf("карточка после проверки: %q", got)
+	}
+}
+
+// Пустой пул: принятие проходит, админ предупреждён, код выдаётся кнопкой после пополнения.
+func TestEmptyPoolThenGetPromo(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	for _, d := range []string{"adm:as:0", "adm:as:s:1", "adm:as:d:3", "adm:as:t:2000:0", "adm:as:go"} {
+		e.click(testAdmin, d)
+	}
+	e.click(2000, "tsk:ac:1")
+	if got := e.tg.last(); !strings.Contains(got, "принято") || !strings.Contains(got, "Промокод пока недоступен") {
+		t.Fatalf("карточка при пустом пуле: %q", got)
+	}
+	e.click(2000, "tsk:pc:1")
+	if got := e.tg.lastAnswer(); got != "Промокодов пока нет. Попробуйте позже." {
+		t.Fatalf("кнопка при пустом пуле: %q", got)
+	}
+	e.click(testAdmin, "adm:pra")
+	e.say(testAdmin, "ZZZ999")
+	e.click(2000, "tsk:pc:1")
+	if got := e.tg.last(); !strings.Contains(got, "ZZZ999") {
+		t.Fatalf("код после пополнения: %q", got)
 	}
 }

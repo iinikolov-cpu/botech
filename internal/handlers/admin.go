@@ -105,6 +105,10 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
 	case "as":
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
+	case "pr", "pra", "prc", "pri", "pru":
+		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
+	case "cp", "cc", "cpd", "cpy", "rv":
+		text, markup, toast = a.compCallback(ctx, b, admin, parts)
 	default:
 		a.answerCB(ctx, b, cb.ID, "Неизвестное действие", false)
 		return
@@ -134,10 +138,20 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 		buyers += fmt.Sprintf(" (заявок: %d)", nPending)
 	}
 	text := fmt.Sprintf("<b>Админ-панель</b>\n\nАктивных покупателей: %d\nЗаявок на рассмотрении: %d", nActive, nPending)
+	if st, err := a.promos.Stats(ctx); err == nil {
+		text += fmt.Sprintf("\nПромокодов свободно: %d", st.Free)
+		if st.Free <= a.promoLow {
+			text += " ⚠"
+		}
+	}
+	if _, n, sum, err := a.reports.CompPage(ctx, domain.CompPending, 1, 0); err == nil && n > 0 {
+		text += fmt.Sprintf("\nК выплате: %d (%s сум)", n, fmtMoney(sum))
+	}
 	return text, kb(
 		row(btn(buyers, "adm:u:"+pendingOrActive(nPending)+":0")),
 		row(btn("📌 Задания", "adm:tk:a:0"), btn("➕ Назначить", "adm:as:0")),
-		row(btn("📋 Сценарии", "adm:sc"), btn("🎟 Инвайты", "adm:inv")),
+		row(btn("📋 Сценарии", "adm:sc"), btn("🎁 Промокоды", "adm:pr")),
+		row(btn("💰 Компенсации", "adm:cp:w:0"), btn("🎟 Инвайты", "adm:inv")),
 		row(btn("🛡 Админы", "adm:adms"), btn("📜 Журнал", "adm:log")),
 	)
 }

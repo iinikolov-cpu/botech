@@ -123,15 +123,19 @@ func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	back := kb(row(btn("📋 К сценариям", "adm:sc")))
 
 	ext := strings.ToLower(filepath.Ext(doc.FileName))
-	if ext != ".yaml" && ext != ".yml" && ext != ".json" && ext != ".txt" {
-		a.send(ctx, b, admin.TgID, "Принимаю файлы сценариев: .yaml, .yml или .json.", back)
+	if ext == ".csv" || ext == ".txt" { // списки промокодов
+		a.onPromoFile(ctx, b, admin, doc)
+		return
+	}
+	if ext != ".yaml" && ext != ".yml" && ext != ".json" {
+		a.send(ctx, b, admin.TgID, "Принимаю файлы сценариев (.yaml, .yml, .json) и списки промокодов (.csv, .txt).", back)
 		return
 	}
 	if doc.FileSize > scenario.MaxFileSize {
 		a.send(ctx, b, admin.TgID, fmt.Sprintf("Файл слишком большой (максимум %d КБ).", scenario.MaxFileSize/1024), back)
 		return
 	}
-	data, err := a.download(ctx, b, doc.FileID)
+	data, err := a.download(ctx, b, doc.FileID, scenario.MaxFileSize)
 	if err != nil {
 		a.log.Error("скачивание файла сценария", "err", err)
 		a.send(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
@@ -174,8 +178,8 @@ func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	a.send(ctx, b, admin.TgID, msg, kb(row(btn("👁 Открыть", "adm:scv:"+itoa(res.Scenario.ID))), row(btn("📋 К сценариям", "adm:sc"))))
 }
 
-// download скачивает файл, загруженный в Telegram (не больше лимита размера сценария).
-func (a *App) download(ctx context.Context, b *bot.Bot, fileID string) ([]byte, error) {
+// download скачивает файл, загруженный в Telegram (читает не больше limit байт).
+func (a *App) download(ctx context.Context, b *bot.Bot, fileID string, limit int64) ([]byte, error) {
 	f, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, err
@@ -195,7 +199,7 @@ func (a *App) download(ctx context.Context, b *bot.Bot, fileID string) ([]byte, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("статус загрузки %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, scenario.MaxFileSize+1))
+	return io.ReadAll(io.LimitReader(resp.Body, limit+1))
 }
 
 // cut обрезает строку по числу символов (для подписей кнопок).

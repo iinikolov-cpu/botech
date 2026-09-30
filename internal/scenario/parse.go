@@ -30,7 +30,10 @@ const (
 	MaxTitleLen   = 100
 )
 
-var keyRe = regexp.MustCompile(`^[a-z0-9_-]{3,40}$`)
+var (
+	keyRe         = regexp.MustCompile(`^[a-z0-9_-]{3,40}$`) // ключ сценария
+	questionKeyRe = regexp.MustCompile(`^[a-z0-9_-]{1,40}$`) // ключ вопроса, допускает короткие q1, q2
+)
 
 // file структура файла сценария. required задаётся указателем, чтобы отличить «не указано» от false.
 type file struct {
@@ -122,8 +125,8 @@ func Parse(data []byte) (*Parsed, []string) {
 		qkey, text := strings.TrimSpace(q.Key), strings.TrimSpace(q.Text)
 		typ := domain.QuestionType(strings.ToLower(strings.TrimSpace(q.Type)))
 		switch {
-		case !keyRe.MatchString(qkey):
-			add("вопрос %d: key нужен латиницей (3-40 символов: a-z, 0-9, - и _)", n)
+		case !questionKeyRe.MatchString(qkey):
+			add("вопрос %d: key нужен латиницей (до 40 символов: a-z, 0-9, - и _)", n)
 		case seen[qkey]:
 			add("вопрос %d: key %q уже используется", n, qkey)
 		}

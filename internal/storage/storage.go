@@ -85,6 +85,40 @@ type FSMRepo interface {
 	Clear(ctx context.Context, userID int64) error
 }
 
+// PromoRepo пул промокодов.
+type PromoRepo interface {
+	// AddBatch добавляет коды, уже существующие пропускает. Возвращает число добавленных.
+	AddBatch(ctx context.Context, codes []string, addedBy int64, at time.Time) (int, error)
+	// Issue атомарно выдаёт свободный код заданию. ErrNotFound, если пул пуст.
+	// Если заданию код уже выдан, возвращает его (повторной выдачи нет).
+	Issue(ctx context.Context, taskID, userID int64, at time.Time) (*domain.PromoCode, error)
+	ByTask(ctx context.Context, taskID int64) (*domain.PromoCode, error) // ErrNotFound, если не выдан
+	Get(ctx context.Context, id int64) (*domain.PromoCode, error)
+	Stats(ctx context.Context) (domain.PromoStats, error)
+	// ListIssued выданные коды: used=false только неиспользованные, true только использованные.
+	ListIssued(ctx context.Context, used bool, limit, offset int) ([]*domain.PromoCode, int, error)
+	MarkUsed(ctx context.Context, id, by int64, at time.Time) (bool, error)
+}
+
+// ReportRepo отчёты и ответы.
+type ReportRepo interface {
+	Create(ctx context.Context, r *domain.Report) error // ErrDuplicate, если отчёт по заданию уже есть
+	ByTask(ctx context.Context, taskID int64) (*domain.Report, error)
+}
+
+// CompRepo компенсации.
+type CompRepo interface {
+	Create(ctx context.Context, c *domain.Compensation) error
+	Get(ctx context.Context, id int64) (*domain.Compensation, error)
+	ByTask(ctx context.Context, taskID int64) (*domain.Compensation, error)
+	List(ctx context.Context, status domain.CompStatus, limit, offset int) ([]*domain.Compensation, int, error)
+	SumByStatus(ctx context.Context, status domain.CompStatus) (int64, error)
+	// MarkPaid ставит «выплачено», только если статус ещё pending.
+	MarkPaid(ctx context.Context, id, by int64, at time.Time) (bool, error)
+	// FindByReceipt ищет другое задание с тем же файлом чека (защита от повторного использования).
+	FindByReceipt(ctx context.Context, uniqueID string, exceptTaskID int64) (int64, bool, error)
+}
+
 // Repos набор всех репозиториев.
 type Repos struct {
 	Users     UserRepo
@@ -93,6 +127,9 @@ type Repos struct {
 	Scenarios ScenarioRepo
 	Tasks     TaskRepo
 	FSM       FSMRepo
+	Promos    PromoRepo
+	Reports   ReportRepo
+	Comps     CompRepo
 }
 
 // Store хранилище: репозитории + транзакции.

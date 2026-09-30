@@ -17,6 +17,9 @@ type Config struct {
 	DBPath       string
 	Location     *time.Location
 	LogLevel     string
+
+	// PromoLowThreshold: при таком остатке промокодов в пуле админы получают предупреждение.
+	PromoLowThreshold int
 }
 
 // Load читает и проверяет переменные окружения.
@@ -43,6 +46,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("неизвестный часовой пояс %q: %w", tz, err)
 	}
 	c.Location = loc
+
+	c.PromoLowThreshold = 5
+	if v := strings.TrimSpace(os.Getenv("PROMO_LOW_THRESHOLD")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, errors.New("PROMO_LOW_THRESHOLD должна быть неотрицательным числом")
+		}
+		c.PromoLowThreshold = n
+	}
 	return c, nil
 }
 

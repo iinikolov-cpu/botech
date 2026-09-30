@@ -38,6 +38,13 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	for i, s := range body.Steps {
 		fmt.Fprintf(&sb, "%d. %s\n", i+1, esc(s))
 	}
+	canHavePromo := t.Status == domain.TaskAccepted || t.Status == domain.TaskExpired
+	switch {
+	case c.Promo != nil:
+		sb.WriteString("\n" + i18n.T(l, "promo_line", esc(c.Promo.Code)) + "\n")
+	case canHavePromo:
+		sb.WriteString("\n" + i18n.T(l, "promo_pending") + "\n")
+	}
 
 	id := itoa(t.ID)
 	var rows [][]models.InlineKeyboardButton
@@ -45,6 +52,9 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	case domain.TaskSent, domain.TaskCreated: // «создано» бывает только в момент доставки
 		rows = append(rows, row(btn(i18n.T(l, "btn_accept"), "tsk:ac:"+id), btn(i18n.T(l, "btn_decline"), "tsk:dc:"+id)))
 	case domain.TaskAccepted, domain.TaskExpired:
+		if c.Promo == nil {
+			rows = append(rows, row(btn(i18n.T(l, "btn_get_promo"), "tsk:pc:"+id)))
+		}
 		rows = append(rows, row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))
 	}
 	rows = append(rows, row(btn(i18n.T(l, "btn_back_list"), "tsk:l")))
@@ -112,8 +122,23 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 	case "v":
 		a.answerCB(ctx, b, cb.ID, "", false)
 	case "rp":
-		a.answerCB(ctx, b, cb.ID, i18n.T(l, "report_soon"), true)
+		a.startReport(ctx, b, u, cb, id)
 		return
+	case "pc": // получить промокод, если при принятии пул был пуст
+		got, err := a.tasks.IssuePromo(ctx, u.TgID, id)
+		if err != nil {
+			a.log.Error("выдача промокода по кнопке", "err", err)
+			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_not_found"), true)
+			return
+		}
+		card = got
+		if card.Promo == nil {
+			a.answerCB(ctx, b, cb.ID, i18n.T(l, "promo_none_yet"), true)
+			a.notifyAdmins(ctx, b, fmt.Sprintf("⚠ Пул промокодов пуст: %s ждёт код (задание #%d). Загрузите коды в разделе «Промокоды».", userLabel(u), id), kb(row(btn("🎁 Промокоды", "adm:pr"))))
+			return
+		}
+		a.answerCB(ctx, b, cb.ID, i18n.T(l, "promo_got"), false)
+		a.warnPool(ctx, b, card)
 	case "dc": // сначала подтверждение: отказ необратим
 		a.answerCB(ctx, b, cb.ID, "", false)
 		a.edit(ctx, b, cb, i18n.T(l, "confirm_decline"), kb(row(
@@ -139,6 +164,11 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 		case card.Task.Status == domain.TaskAccepted:
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_accepted", a.fmtTime(card.Task.DueAt)), true)
 			a.notifyCreator(ctx, b, card, "✅ принял задание", "срок до "+a.fmtTime(card.Task.DueAt))
+			if card.Promo == nil {
+				a.notifyAdmins(ctx, b, fmt.Sprintf("⚠ Пул промокодов пуст: %s принял задание #%d, но код не выдан. Покупатель сможет получить его кнопкой позже. Загрузите коды.", userLabel(card.User), card.Task.ID), kb(row(btn("🎁 Промокоды", "adm:pr"))))
+			} else {
+				a.warnPool(ctx, b, card)
+			}
 		default:
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_declined"), true)
 			a.notifyCreator(ctx, b, card, "❌ отказался от задания", "")
@@ -176,4 +206,14 @@ func (a *App) deliverTask(ctx context.Context, b *bot.Bot, taskID int64) bool {
 		a.log.Error("фиксация отправки", "task", taskID, "err", err)
 	}
 	return true
+}
+
+// warnPool предупреждает админов, когда после выдачи в пуле осталось ровно пороговое число кодов
+// (или ноль). Равенство, а не «меньше», чтобы предупреждение приходило один раз, а не при каждой выдаче.
+func (a *App) warnPool(ctx context.Context, b *bot.Bot, c *service.TaskCard) {
+	if !c.NewPromo || (c.PoolLeft != a.promoLow && c.PoolLeft != 0) {
+		return
+	}
+	text := fmt.Sprintf("⚠ Промокодов в пуле осталось: <b>%d</b>. Загрузите новые.", c.PoolLeft)
+	a.notifyAdmins(ctx, b, text, kb(row(btn("➕ Загрузить коды", "adm:pra"))))
 }

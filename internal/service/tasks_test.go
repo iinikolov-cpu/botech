@@ -234,7 +234,7 @@ func TestAcceptFlow(t *testing.T) {
 	for _, ev := range events {
 		kinds = append(kinds, ev.Kind+":"+string(ev.ToStatus))
 	}
-	if got := strings.Join(kinds, ","); got != "created:created,status:sent,status:accepted" {
+	if got := strings.Join(kinds, ","); got != "created:created,status:sent,status:accepted,promo_missing:" {
 		t.Errorf("история %q", got)
 	}
 }

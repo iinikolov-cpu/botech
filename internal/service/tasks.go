@@ -33,6 +33,12 @@ type TaskCard struct {
 	Scenario *domain.Scenario
 	Version  *domain.ScenarioVersion // именно та версия, по которой выдано задание
 	User     *domain.User
+	Promo    *domain.PromoCode    // выданный промокод (nil, если не выдан)
+	Comp     *domain.Compensation // данные компенсации (nil, если нет)
+
+	// Заполняются только результатом Accept и IssuePromo.
+	NewPromo bool // код выдан именно этим вызовом
+	PoolLeft int  // сколько свободных кодов осталось после выдачи
 }
 
 // AssignResult итог назначения нескольким покупателям.
@@ -113,7 +119,7 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 
 // MarkSent фиксирует успешную доставку задания покупателю (создано -> отправлено).
 func (s *Tasks) MarkSent(ctx context.Context, taskID int64) error {
-	_, err := s.transition(ctx, taskID, 0, domain.TaskSent, "")
+	_, err := s.transition(ctx, taskID, 0, domain.TaskSent, "", nil)
 	return err
 }
 
@@ -138,20 +144,91 @@ func (s *Tasks) Decline(ctx context.Context, userID, taskID int64) (*TaskCard, b
 func (s *Tasks) byBuyer(ctx context.Context, userID, taskID int64, to domain.TaskStatus) (*TaskCard, bool, error) {
 	// Покупатель нажал кнопку, значит сообщение он получил. Если бот ещё не успел
 	// отметить отправку (доли секунды между отправкой и записью), делаем это здесь.
-	if _, err := s.transition(ctx, taskID, userID, domain.TaskSent, ""); err != nil {
+	if _, err := s.transition(ctx, taskID, userID, domain.TaskSent, "", nil); err != nil {
 		return nil, false, err
 	}
-	changed, err := s.transition(ctx, taskID, userID, to, "")
+	var (
+		issued bool
+		left   int
+		hook   func(storage.Repos, *domain.Task, time.Time) error
+	)
+	if to == domain.TaskAccepted {
+		// Промокод выдаётся в той же транзакции, что и принятие: либо оба действия, либо ни одного.
+		hook = func(r storage.Repos, t *domain.Task, now time.Time) error {
+			var err error
+			issued, left, err = issuePromo(ctx, r, t, now)
+			return err
+		}
+	}
+	changed, err := s.transition(ctx, taskID, userID, to, "", hook)
 	if err != nil {
 		return nil, false, err
 	}
 	card, err := s.Card(ctx, taskID)
+	if card != nil && changed {
+		card.NewPromo, card.PoolLeft = issued, left
+	}
 	return card, changed, err
+}
+
+// issuePromo выдаёт заданию код из пула (если он ещё не выдан) и пишет событие в историю.
+// Пустой пул не ошибка: задание остаётся без кода, админа предупредит вызывающий.
+func issuePromo(ctx context.Context, r storage.Repos, t *domain.Task, now time.Time) (issued bool, left int, err error) {
+	if _, err := r.Promos.ByTask(ctx, t.ID); err == nil {
+		return false, 0, nil // уже выдан ранее
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return false, 0, err
+	}
+	_, err = r.Promos.Issue(ctx, t.ID, t.UserID, now)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		return false, 0, r.Tasks.AddEvent(ctx, &domain.TaskEvent{
+			TaskID: t.ID, Kind: "promo_missing", Details: "пул промокодов пуст", At: now,
+		})
+	case err != nil:
+		return false, 0, err
+	}
+	if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: t.ID, Kind: "promo_issued", Details: "выдан промокод", At: now}); err != nil {
+		return false, 0, err
+	}
+	st, err := r.Promos.Stats(ctx)
+	return true, st.Free, err
+}
+
+// IssuePromo выдаёт промокод принятому заданию, если при принятии пул был пуст.
+// Повторный вызов ничего не выдаёт: код один на задание.
+func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard, error) {
+	var (
+		issued bool
+		left   int
+	)
+	err := s.store.WithTx(ctx, func(r storage.Repos) error {
+		t, err := r.Tasks.Get(ctx, taskID)
+		if errors.Is(err, storage.ErrNotFound) || (err == nil && t.UserID != userID) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if t.Status != domain.TaskAccepted && t.Status != domain.TaskExpired {
+			return fmt.Errorf("%w: промокод выдаётся принятым заданиям", ErrForbidden)
+		}
+		issued, left, err = issuePromo(ctx, r, t, s.now().UTC())
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	card, err := s.Card(ctx, taskID)
+	if card != nil {
+		card.NewPromo, card.PoolLeft = issued, left
+	}
+	return card, err
 }
 
 // Review админ помечает задание «проверено».
 func (s *Tasks) Review(ctx context.Context, admin, taskID int64) (bool, error) {
-	changed, err := s.transition(ctx, taskID, 0, domain.TaskReviewed, "")
+	changed, err := s.transition(ctx, taskID, 0, domain.TaskReviewed, "", nil)
 	if err != nil || !changed {
 		return changed, err
 	}
@@ -162,7 +239,8 @@ func (s *Tasks) Review(ctx context.Context, admin, taskID int64) (bool, error) {
 
 // transition общий путь смены статуса: проверка владельца (если owner != 0), правил переходов,
 // атомарное обновление и запись в историю. Возвращает changed=false, если статус уже был другим.
-func (s *Tasks) transition(ctx context.Context, taskID, owner int64, to domain.TaskStatus, details string) (bool, error) {
+func (s *Tasks) transition(ctx context.Context, taskID, owner int64, to domain.TaskStatus, details string,
+	after func(r storage.Repos, t *domain.Task, now time.Time) error) (bool, error) {
 	changed := false
 	err := s.store.WithTx(ctx, func(r storage.Repos) error {
 		t, err := r.Tasks.Get(ctx, taskID)
@@ -188,9 +266,15 @@ func (s *Tasks) transition(ctx context.Context, taskID, owner int64, to domain.T
 			return err // !ok: параллельный запрос успел раньше
 		}
 		changed = true
-		return r.Tasks.AddEvent(ctx, &domain.TaskEvent{
+		if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{
 			TaskID: taskID, Kind: "status", FromStatus: t.Status, ToStatus: to, ActorID: owner, Details: details, At: now,
-		})
+		}); err != nil {
+			return err
+		}
+		if after != nil {
+			return after(r, t, now)
+		}
+		return nil
 	})
 	return changed, err
 }
@@ -221,7 +305,14 @@ func (s *Tasks) card(ctx context.Context, r storage.Repos, t *domain.Task) (*Tas
 	if err != nil {
 		return nil, err
 	}
-	return &TaskCard{Task: t, Scenario: sc, Version: v, User: u}, nil
+	c := &TaskCard{Task: t, Scenario: sc, Version: v, User: u}
+	if c.Promo, err = r.Promos.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	if c.Comp, err = r.Comps.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Events история задания.

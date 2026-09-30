@@ -88,6 +88,9 @@ func reposFor(q dbtx) storage.Repos {
 		Scenarios: &scenarioRepo{q},
 		Tasks:     &taskRepo{q},
 		FSM:       &fsmRepo{q},
+		Promos:    &promoRepo{q},
+		Reports:   &reportRepo{q},
+		Comps:     &compRepo{q},
 	}
 }
 

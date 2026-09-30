@@ -22,6 +22,10 @@ type Services struct {
 	Scenarios *service.Scenarios
 	Tasks     *service.Tasks
 	Dialog    *service.Dialog
+	Promos    *service.Promos
+	Reports   *service.Reports
+
+	PromoLowThreshold int // при каком остатке кодов предупреждать админов
 }
 
 // App хранит зависимости обработчиков.
@@ -30,6 +34,9 @@ type App struct {
 	scenarios   *service.Scenarios
 	tasks       *service.Tasks
 	dialog      *service.Dialog
+	promos      *service.Promos
+	reports     *service.Reports
+	promoLow    int
 	log         *slog.Logger
 	loc         *time.Location
 	botUsername string
@@ -41,7 +48,8 @@ type App struct {
 // New создаёт приложение обработчиков.
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
-		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog, log: log, loc: loc,
+		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
+		promos: svc.Promos, reports: svc.Reports, promoLow: svc.PromoLowThreshold, log: log, loc: loc,
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}
@@ -58,15 +66,34 @@ func (a *App) Register(b *bot.Bot, username string) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "tasks", bot.MatchTypeCommand, a.onTasksCommand)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "adm:", bot.MatchTypePrefix, a.adminOnly(a.onAdminCallback))
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "tsk:", bot.MatchTypePrefix, a.onTaskCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "rpt:", bot.MatchTypePrefix, a.onReportCallback)
 	// Файлы сценариев (документы) принимаем только от админов.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.Message != nil && u.Message.Document != nil
 	}, a.adminOnly(a.onDocument))
 }
 
-// DefaultHandler обрабатывает всё, что не подошло под маршруты (свободный текст и т.п.).
+// DefaultHandler обрабатывает всё, что не подошло под маршруты: ответы в пошаговых диалогах
+// (отчёт, загрузка промокодов) и свободный текст.
 func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update) {
-	if u := userFrom(ctx); u != nil && upd.Message != nil && upd.Message.Text != "" {
+	u := userFrom(ctx)
+	if u == nil || upd.Message == nil {
+		return
+	}
+	m := upd.Message
+	switch state, _ := a.dialog.Get(ctx, u.TgID, nil); state {
+	case reportDialog:
+		if st, ok := a.loadReport(ctx, u.TgID); ok {
+			a.onReportMessage(ctx, b, u, st, m)
+			return
+		}
+	case promoAddDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.importPromos(ctx, b, u, m.Text)
+			return
+		}
+	}
+	if m.Text != "" {
 		a.send(ctx, b, u.TgID, i18n.T(lang(u), "help_buyer"), nil)
 	}
 }

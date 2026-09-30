@@ -121,6 +121,16 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 		fmt.Fprintf(&sb, " (до %s)", a.fmtTime(t.DueAt))
 	}
 	sb.WriteString("\n")
+	if c.Promo != nil {
+		state := "выдан"
+		if c.Promo.Status == domain.PromoUsed {
+			state = "использован"
+		}
+		fmt.Fprintf(&sb, "Промокод: <code>%s</code> (%s)\n", esc(c.Promo.Code), state)
+	}
+	if c.Comp != nil {
+		fmt.Fprintf(&sb, "Компенсация: %s сум (%s)\n", fmtMoney(c.Comp.Amount), map[domain.CompStatus]string{domain.CompPending: "к выплате", domain.CompPaid: "выплачено"}[c.Comp.Status])
+	}
 
 	events, _ := a.tasks.Events(ctx, id)
 	if len(events) > 0 {
@@ -137,6 +147,12 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	case domain.TaskReported:
 		rows = append(rows, row(btn("✅ Проверено", "adm:trv:"+itoa(id))))
 	}
+	if c.Task.Status == domain.TaskReported || c.Task.Status == domain.TaskReviewed {
+		rows = append(rows, row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(id))))
+	}
+	if c.Promo != nil && c.Promo.Status == domain.PromoIssued {
+		rows = append(rows, row(btn("🎁 Промокод использован", fmt.Sprintf("adm:pru:%d:t:%d", c.Promo.ID, id))))
+	}
 	rows = append(rows, row(btn("« К заданиям", "adm:tk:a:0")))
 	return sb.String(), kb(rows...)
 }
@@ -148,7 +164,15 @@ func describeEvent(e *domain.TaskEvent) string {
 	case "send_failed":
 		return "не доставлено: " + e.Details
 	case "status":
-		return fmt.Sprintf("%s → %s", e.FromStatus.Title(), e.ToStatus.Title())
+		s := fmt.Sprintf("%s → %s", e.FromStatus.Title(), e.ToStatus.Title())
+		if e.Details != "" {
+			s += " (" + e.Details + ")"
+		}
+		return s
+	case "promo_issued":
+		return "выдан промокод"
+	case "promo_missing":
+		return "промокод не выдан: пул пуст"
 	}
 	return e.Kind
 }

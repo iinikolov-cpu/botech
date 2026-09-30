@@ -48,11 +48,15 @@ func run() error {
 		return err
 	}
 
+	tasks := service.NewTasks(store)
 	app := handlers.New(handlers.Services{
-		Access:    access,
-		Scenarios: service.NewScenarios(store),
-		Tasks:     service.NewTasks(store),
-		Dialog:    service.NewDialog(store),
+		Access:            access,
+		Scenarios:         service.NewScenarios(store),
+		Tasks:             tasks,
+		Dialog:            service.NewDialog(store),
+		Promos:            service.NewPromos(store),
+		Reports:           service.NewReports(store, tasks),
+		PromoLowThreshold: cfg.PromoLowThreshold,
 	}, log, cfg.Location)
 	b, err := bot.New(cfg.BotToken,
 		bot.WithMiddlewares(app.Middleware),
