@@ -844,15 +844,16 @@ func TestReworkFlow(t *testing.T) {
 	e.press(t, 2000, "rpt:y:", ":yes")
 	e.sendPhoto(2000, "PHOTO-FIXED")
 	e.press(t, 2000, "rpt:s:", "")
-	e.press(t, 2000, "rpt:ca:", ":1")
-	e.say(2000, "160000")
-	e.sendPhoto(2000, "RECEIPT-FIXED")
+	// Компенсация уже отправлена: заново её не спрашиваем, сразу итог с прежней суммой.
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Проверьте отчёт") || !strings.Contains(m.Text, "150 000 сум, данные уже отправлены") {
+		t.Fatalf("итог без повторного ввода компенсации: %q", m.Text)
+	}
 	e.press(t, 2000, "rpt:ok:", "")
 	if !e.tg.anyTo(testAdmin, "версия 2") && !e.tg.anyTo(testAdmin, "Получен отчёт") {
 		t.Fatal("админ не получил исправленный отчёт")
 	}
 	e.click(testAdmin, "adm:rv:1")
-	if got := e.tg.last(); !strings.Contains(got, "версия 2") || !strings.Contains(got, "160 000 сум") {
+	if got := e.tg.last(); !strings.Contains(got, "версия 2") || !strings.Contains(got, "150 000 сум (к выплате)") {
 		t.Fatalf("новая версия отчёта: %q", got)
 	}
 	// Принимаем отчёт: он остаётся в «Отчётах», пока компенсация не выплачена.
@@ -1008,5 +1009,76 @@ func TestAssignSameScenarioTwice(t *testing.T) {
 	m, _ := e.tg.lastTo(2000)
 	if !strings.Contains(m.Markup, "#1 ") || !strings.Contains(m.Markup, "#2 ") {
 		t.Fatalf("список заданий покупателя: %s", m.Markup)
+	}
+}
+
+// Можно передумать и изменить уже отправленную компенсацию прямо при доработке отчёта.
+func TestReworkChangeCompensation(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "150000")
+	e.click(testAdmin, "adm:rw:1")
+	e.say(testAdmin, "Поправьте ответы")
+
+	e.click(2000, "tsk:rp:1")
+	e.press(t, 2000, "rpt:r:", ":3")
+	e.press(t, 2000, "rpt:y:", ":no")
+	e.sendPhoto(2000, "P2")
+	e.press(t, 2000, "rpt:s:", "")
+	// Передумал: открываем ввод, затем возвращаемся «Назад» к итогу без изменений.
+	e.press(t, 2000, "rpt:cc:", "")
+	if !e.tg.anyTo(2000, "Введите сумму") {
+		t.Fatal("нет запроса новой суммы")
+	}
+	e.press(t, 2000, "rpt:b:", "")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "останутся без изменений") {
+		t.Fatalf("после «Назад» компенсация должна остаться прежней: %q", m.Text)
+	}
+	// Теперь меняем по-настоящему.
+	e.press(t, 2000, "rpt:cc:", "")
+	e.say(2000, "99 000")
+	e.sendPhoto(2000, "RECEIPT-99")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "99 000 сум, чек приложен") {
+		t.Fatalf("итог с новой суммой: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:ok:", "")
+	e.click(testAdmin, "adm:cp:w:0")
+	if got := e.tg.last(); !strings.Contains(got, "99 000") || !strings.Contains(got, "Записей: 1") {
+		t.Fatalf("компенсация должна обновиться, а не задвоиться: %q", got)
+	}
+}
+
+// Если компенсацию отклонили и отчёт вернули на доработку, новые данные компенсации обязательны.
+func TestReworkAfterRejectedCompensation(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "150000")
+	e.click(testAdmin, "adm:cc:1")
+	e.clickOnPhoto(testAdmin, "adm:crj:1")
+	e.say(testAdmin, "Чек не тот")
+	e.click(testAdmin, "adm:rw:1")
+	e.say(testAdmin, "И ответы поправьте")
+
+	e.click(2000, "tsk:rp:1")
+	e.press(t, 2000, "rpt:r:", ":5")
+	e.press(t, 2000, "rpt:y:", ":yes")
+	e.sendPhoto(2000, "P3")
+	e.press(t, 2000, "rpt:s:", "")
+	// Вопрос «нужна ли компенсация» не задаётся: сразу просят новую сумму.
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Введите сумму") {
+		t.Fatalf("ожидали запрос суммы: %q", m.Text)
+	}
+	e.say(2000, "140000")
+	e.sendPhoto(2000, "RECEIPT-140")
+	e.press(t, 2000, "rpt:ok:", "")
+	e.click(testAdmin, "adm:cp:w:0")
+	if got := e.tg.last(); !strings.Contains(got, "140 000") || !strings.Contains(got, "Записей: 1") {
+		t.Fatalf("исправленная компенсация снова к выплате: %q", got)
 	}
 }

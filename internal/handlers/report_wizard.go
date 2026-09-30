@@ -36,8 +36,12 @@ type reportState struct {
 	Idx     int             `json:"idx"` // номер вопроса в фазе phaseQuestion
 	Answers []domain.Answer `json:"answers"`
 
-	WantComp        bool   `json:"want_comp"`
-	CompOnly        bool   `json:"comp_only"` // исправление только данных компенсации, без отчёта
+	WantComp bool `json:"want_comp"`
+	CompOnly bool `json:"comp_only"` // исправление только данных компенсации, без отчёта
+	// При доработке отчёта уже отправленную компенсацию повторно не запрашиваем.
+	KeepComp        bool   `json:"keep_comp"`     // данные компенсации уже есть (к выплате или выплачена) и остаются как есть
+	KeepAmount      int64  `json:"keep_amount"`   // сумма уже отправленной компенсации (для показа)
+	CompRejected    bool   `json:"comp_rejected"` // компенсация отклонена: новые данные обязательны
 	Amount          int64  `json:"amount"`
 	ReceiptFileID   string `json:"receipt_file_id"`
 	ReceiptUniqueID string `json:"receipt_unique_id"`
@@ -79,8 +83,17 @@ func (a *App) startReport(ctx context.Context, b *bot.Bot, u *domain.User, cb *m
 	if !ok || st.TaskID != taskID || st.CompOnly {
 		st = &reportState{TaskID: taskID, Phase: phaseQuestion}
 		// После возврата на доработку сначала напоминаем, что просил исправить админ.
-		if card, err := a.tasks.Card(ctx, taskID); err == nil && card.Task.Status == domain.TaskRework && card.Report != nil && card.Report.AdminComment != "" {
-			a.send(ctx, b, u.TgID, i18n.T(l, "rpt_rework_intro", esc(card.Report.AdminComment)), nil)
+		if card, err := a.tasks.Card(ctx, taskID); err == nil {
+			if card.Task.Status == domain.TaskRework && card.Report != nil && card.Report.AdminComment != "" {
+				a.send(ctx, b, u.TgID, i18n.T(l, "rpt_rework_intro", esc(card.Report.AdminComment)), nil)
+			}
+			if c := card.Comp; c != nil {
+				if c.Status == domain.CompRejected {
+					st.CompRejected = true // данные были отклонены, без новых не обойтись
+				} else {
+					st.KeepComp, st.KeepAmount = true, c.Amount
+				}
+			}
 		}
 	}
 	st.Step++
@@ -177,8 +190,11 @@ func (a *App) ask(ctx context.Context, b *bot.Bot, u *domain.User, st *reportSta
 				row(btn(i18n.T(l, "btn_send_fix"), cb("ok"))), nav(true, false)))
 			break
 		}
-		a.send(ctx, b, u.TgID, a.reportSummary(l, qs, st), kb(
-			row(btn(i18n.T(l, "btn_send_report"), cb("ok"))), nav(true, false)))
+		rows := [][]models.InlineKeyboardButton{row(btn(i18n.T(l, "btn_send_report"), cb("ok")))}
+		if st.KeepComp && !st.WantComp {
+			rows = append(rows, row(btn(i18n.T(l, "btn_change_comp"), cb("cc"))))
+		}
+		a.send(ctx, b, u.TgID, a.reportSummary(l, qs, st), kb(append(rows, nav(true, false))...))
 	}
 }
 
@@ -195,6 +211,8 @@ func (a *App) reportSummary(l i18n.Lang, qs []domain.Question, st *reportState) 
 	}
 	if st.WantComp {
 		sb.WriteString(i18n.T(l, "rpt_comp_line", fmtMoney(st.Amount)))
+	} else if st.KeepComp {
+		sb.WriteString(i18n.T(l, "rpt_comp_keep", fmtMoney(st.KeepAmount)))
 	} else {
 		sb.WriteString(i18n.T(l, "rpt_comp_none"))
 	}
@@ -231,9 +249,14 @@ func (st *reportState) setAnswer(an domain.Answer) {
 func (st *reportState) advance(total int) {
 	switch st.Phase {
 	case phaseQuestion:
-		if st.Idx+1 < total {
+		switch {
+		case st.Idx+1 < total:
 			st.Idx++
-		} else {
+		case st.KeepComp: // компенсация уже отправлена: сразу к итогу
+			st.Phase = phaseConfirm
+		case st.CompRejected: // прежние данные отклонены: спрашивать «нужна ли» незачем
+			st.WantComp, st.Phase = true, phaseCompAmount
+		default:
 			st.Phase = phaseCompAsk
 		}
 	case phaseCompAsk:
@@ -259,15 +282,24 @@ func (st *reportState) back(total int) {
 	case phaseCompAsk:
 		st.Phase, st.Idx = phaseQuestion, total-1
 	case phaseCompAmount:
-		if !st.CompOnly { // при исправлении компенсации шага «назад» нет
+		switch {
+		case st.CompOnly: // при исправлении компенсации шага «назад» нет
+		case st.KeepComp: // передумал менять: возвращаемся к итогу с прежней компенсацией
+			st.WantComp, st.Phase = false, phaseConfirm
+		case st.CompRejected:
+			st.Phase, st.Idx = phaseQuestion, total-1
+		default:
 			st.Phase = phaseCompAsk
 		}
 	case phaseCompReceipt:
 		st.Phase = phaseCompAmount
 	case phaseConfirm:
-		if st.WantComp {
+		switch {
+		case st.WantComp:
 			st.Phase = phaseCompReceipt
-		} else {
+		case st.KeepComp:
+			st.Phase, st.Idx = phaseQuestion, total-1
+		default:
 			st.Phase = phaseCompAsk
 		}
 	}
@@ -340,6 +372,12 @@ func (a *App) onReportCallback(ctx context.Context, b *bot.Bot, upd *models.Upda
 		}
 		st.WantComp = arg == "1"
 		st.advance(len(qs))
+	case "cc": // изменить уже отправленную компенсацию
+		if st.Phase != phaseConfirm || !st.KeepComp || st.WantComp {
+			a.answerCB(ctx, b, cb.ID, i18n.T(l, "rpt_stale"), true)
+			return
+		}
+		st.WantComp, st.Phase = true, phaseCompAmount
 	case "ok":
 		if st.Phase != phaseConfirm {
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "rpt_stale"), true)
