@@ -65,6 +65,13 @@ func row(b ...models.InlineKeyboardButton) []models.InlineKeyboardButton { retur
 
 // send отправляет HTML-сообщение; ошибки только логируются.
 func (a *App) send(ctx context.Context, b *bot.Bot, chatID int64, text string, markup *models.InlineKeyboardMarkup) {
+	if err := a.trySend(ctx, b, chatID, text, markup); err != nil {
+		a.log.Warn("не удалось отправить сообщение", "user", maskID(chatID), "err", err)
+	}
+}
+
+// trySend отправляет HTML-сообщение и возвращает ошибку (нужно там, где важен факт доставки).
+func (a *App) trySend(ctx context.Context, b *bot.Bot, chatID int64, text string, markup *models.InlineKeyboardMarkup) error {
 	p := &bot.SendMessageParams{
 		ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
@@ -72,9 +79,8 @@ func (a *App) send(ctx context.Context, b *bot.Bot, chatID int64, text string, m
 	if markup != nil {
 		p.ReplyMarkup = markup
 	}
-	if _, err := b.SendMessage(ctx, p); err != nil {
-		a.log.Warn("не удалось отправить сообщение", "user", maskID(chatID), "err", err)
-	}
+	_, err := b.SendMessage(ctx, p)
+	return err
 }
 
 // edit заменяет текст сообщения с кнопкой (для навигации по меню).

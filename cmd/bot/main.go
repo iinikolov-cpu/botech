@@ -48,7 +48,12 @@ func run() error {
 		return err
 	}
 
-	app := handlers.New(access, log, cfg.Location)
+	app := handlers.New(handlers.Services{
+		Access:    access,
+		Scenarios: service.NewScenarios(store),
+		Tasks:     service.NewTasks(store),
+		Dialog:    service.NewDialog(store),
+	}, log, cfg.Location)
 	b, err := bot.New(cfg.BotToken,
 		bot.WithMiddlewares(app.Middleware),
 		bot.WithDefaultHandler(app.DefaultHandler),
@@ -70,6 +75,7 @@ func run() error {
 
 	_, _ = b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: []models.BotCommand{
 		{Command: "start", Description: "Главное меню"},
+		{Command: "tasks", Description: "Мои задания"},
 		{Command: "help", Description: "Справка"},
 	}})
 

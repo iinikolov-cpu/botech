@@ -82,9 +82,12 @@ func (s *Store) WithTx(ctx context.Context, fn func(r storage.Repos) error) erro
 
 func reposFor(q dbtx) storage.Repos {
 	return storage.Repos{
-		Users:   &userRepo{q},
-		Invites: &inviteRepo{q},
-		Audit:   &auditRepo{q},
+		Users:     &userRepo{q},
+		Invites:   &inviteRepo{q},
+		Audit:     &auditRepo{q},
+		Scenarios: &scenarioRepo{q},
+		Tasks:     &taskRepo{q},
+		FSM:       &fsmRepo{q},
 	}
 }
 

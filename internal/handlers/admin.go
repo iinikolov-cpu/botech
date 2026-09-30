@@ -99,6 +99,12 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup = a.screenAdmins(ctx)
 	case "log":
 		text, markup = a.screenLog(ctx)
+	case "sc", "scv", "sca", "sct":
+		text, markup = a.scenarioCallback(ctx, b, admin, parts)
+	case "tk", "tc", "trv", "trs":
+		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
+	case "as":
+		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
 	default:
 		a.answerCB(ctx, b, cb.ID, "Неизвестное действие", false)
 		return
@@ -130,7 +136,8 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 	text := fmt.Sprintf("<b>Админ-панель</b>\n\nАктивных покупателей: %d\nЗаявок на рассмотрении: %d", nActive, nPending)
 	return text, kb(
 		row(btn(buyers, "adm:u:"+pendingOrActive(nPending)+":0")),
-		row(btn("🎟 Инвайты", "adm:inv")),
+		row(btn("📌 Задания", "adm:tk:a:0"), btn("➕ Назначить", "adm:as:0")),
+		row(btn("📋 Сценарии", "adm:sc"), btn("🎟 Инвайты", "adm:inv")),
 		row(btn("🛡 Админы", "adm:adms"), btn("📜 Журнал", "adm:log")),
 	)
 }

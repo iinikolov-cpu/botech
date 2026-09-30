@@ -16,9 +16,20 @@ import (
 	"botech/internal/service"
 )
 
+// Services набор сервисов бизнес-логики, нужных обработчикам.
+type Services struct {
+	Access    *service.Access
+	Scenarios *service.Scenarios
+	Tasks     *service.Tasks
+	Dialog    *service.Dialog
+}
+
 // App хранит зависимости обработчиков.
 type App struct {
 	access      *service.Access
+	scenarios   *service.Scenarios
+	tasks       *service.Tasks
+	dialog      *service.Dialog
 	log         *slog.Logger
 	loc         *time.Location
 	botUsername string
@@ -28,9 +39,9 @@ type App struct {
 }
 
 // New создаёт приложение обработчиков.
-func New(access *service.Access, log *slog.Logger, loc *time.Location) *App {
+func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
-		access: access, log: log, loc: loc,
+		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog, log: log, loc: loc,
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}
@@ -44,7 +55,13 @@ func (a *App) Register(b *bot.Bot, username string) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "admin", bot.MatchTypeCommand, a.adminOnly(a.onAdmin))
 	b.RegisterHandler(bot.HandlerTypeMessageText, "addadmin", bot.MatchTypeCommand, a.adminOnly(a.onAddAdmin))
 	b.RegisterHandler(bot.HandlerTypeMessageText, "rmadmin", bot.MatchTypeCommand, a.adminOnly(a.onRemoveAdmin))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "tasks", bot.MatchTypeCommand, a.onTasksCommand)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "adm:", bot.MatchTypePrefix, a.adminOnly(a.onAdminCallback))
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "tsk:", bot.MatchTypePrefix, a.onTaskCallback)
+	// Файлы сценариев (документы) принимаем только от админов.
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.Document != nil
+	}, a.adminOnly(a.onDocument))
 }
 
 // DefaultHandler обрабатывает всё, что не подошло под маршруты (свободный текст и т.п.).
@@ -184,11 +201,11 @@ func (a *App) onStart(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	if u == nil || upd.Message == nil {
 		return
 	}
-	text := i18n.T(lang(u), "welcome_buyer", esc(u.FirstName)) + "\n\n" + i18n.T(lang(u), "no_tasks")
+	text := i18n.T(lang(u), "welcome_buyer", esc(u.FirstName))
 	if u.IsAdmin() {
 		text += i18n.T(lang(u), "help_admin")
 	}
-	a.send(ctx, b, u.TgID, text, nil)
+	a.send(ctx, b, u.TgID, text, kb(row(btn(i18n.T(lang(u), "btn_tasks"), "tsk:l"))))
 }
 
 func (a *App) onHelp(ctx context.Context, b *bot.Bot, upd *models.Update) {

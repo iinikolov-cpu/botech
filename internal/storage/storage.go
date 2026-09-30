@@ -5,12 +5,16 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"botech/internal/domain"
 )
 
 // ErrNotFound возвращается, когда запись не найдена.
 var ErrNotFound = errors.New("не найдено")
+
+// ErrDuplicate возвращается при нарушении уникальности (например, второе активное задание).
+var ErrDuplicate = errors.New("уже существует")
 
 // UserRepo работа с пользователями.
 type UserRepo interface {
@@ -39,11 +43,56 @@ type AuditRepo interface {
 	List(ctx context.Context, limit int) ([]*domain.AuditEntry, error)
 }
 
+// ScenarioRepo сценарии и их версии.
+type ScenarioRepo interface {
+	Create(ctx context.Context, s *domain.Scenario) error // заполняет ID; ErrDuplicate при занятом ключе
+	GetByKey(ctx context.Context, key string) (*domain.Scenario, error)
+	GetByID(ctx context.Context, id int64) (*domain.Scenario, error)
+	// UpdateHead обновляет копию названия и оператора (для списков) после новой версии.
+	UpdateHead(ctx context.Context, id int64, title, operator string, at time.Time) error
+	SetArchived(ctx context.Context, id int64, archived bool, at time.Time) error
+	List(ctx context.Context, includeArchived bool, limit, offset int) ([]*domain.Scenario, error)
+	// AddVersion добавляет версию со следующим номером и заполняет ID и Version.
+	AddVersion(ctx context.Context, v *domain.ScenarioVersion) error
+	GetVersion(ctx context.Context, id int64) (*domain.ScenarioVersion, error)
+	LatestVersion(ctx context.Context, scenarioID int64) (*domain.ScenarioVersion, error)
+}
+
+// TaskFilter условия выборки заданий (нулевые значения = без фильтра).
+type TaskFilter struct {
+	UserID   int64
+	Statuses []domain.TaskStatus
+}
+
+// TaskRepo задания и их история.
+type TaskRepo interface {
+	Create(ctx context.Context, t *domain.Task) error // заполняет ID; ErrDuplicate, если уже есть активное
+	Get(ctx context.Context, id int64) (*domain.Task, error)
+	List(ctx context.Context, f TaskFilter, limit, offset int) ([]*domain.Task, error)
+	Count(ctx context.Context, f TaskFilter) (int, error)
+	// Transition атомарно меняет статус, только если он сейчас равен from.
+	// Возвращает false, если статус уже другой (например, повторное нажатие кнопки).
+	// at пишется в поле времени нового статуса; dueAt используется при переходе в accepted.
+	Transition(ctx context.Context, id int64, from, to domain.TaskStatus, at, dueAt time.Time) (bool, error)
+	AddEvent(ctx context.Context, e *domain.TaskEvent) error
+	Events(ctx context.Context, taskID int64) ([]*domain.TaskEvent, error)
+}
+
+// FSMRepo состояние пошаговых диалогов.
+type FSMRepo interface {
+	Get(ctx context.Context, userID int64) (state, data string, err error) // ErrNotFound, если нет
+	Set(ctx context.Context, userID int64, state, data string, at time.Time) error
+	Clear(ctx context.Context, userID int64) error
+}
+
 // Repos набор всех репозиториев.
 type Repos struct {
-	Users   UserRepo
-	Invites InviteRepo
-	Audit   AuditRepo
+	Users     UserRepo
+	Invites   InviteRepo
+	Audit     AuditRepo
+	Scenarios ScenarioRepo
+	Tasks     TaskRepo
+	FSM       FSMRepo
 }
 
 // Store хранилище: репозитории + транзакции.
