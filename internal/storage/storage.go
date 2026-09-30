@@ -76,6 +76,9 @@ type TaskRepo interface {
 	Transition(ctx context.Context, id int64, from, to domain.TaskStatus, at, dueAt time.Time) (bool, error)
 	AddEvent(ctx context.Context, e *domain.TaskEvent) error
 	Events(ctx context.Context, taskID int64) ([]*domain.TaskEvent, error)
+	// DeleteUnstarted полностью удаляет задание вместе с историей, но только в статусах
+	// created, sent, declined (у них нет ни промокода, ни отчёта). false, если статус другой.
+	DeleteUnstarted(ctx context.Context, id int64) (bool, error)
 }
 
 // FSMRepo состояние пошаговых диалогов.

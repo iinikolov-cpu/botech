@@ -265,3 +265,13 @@ func TestCompensationPaid(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// reportOK отправляет валидный отчёт по заданию сценария scenarioYAML (один текстовый вопрос).
+func (e *env) reportOK(t *testing.T, user, taskID int64) {
+	t.Helper()
+	if _, err := e.reports().Submit(context.Background(), user, taskID, SubmitInput{
+		Answers: []domain.Answer{{Key: "q_one", Value: "ответ"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

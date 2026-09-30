@@ -6,21 +6,22 @@ import "time"
 type TaskStatus string
 
 const (
-	TaskCreated  TaskStatus = "created"  // создано, ещё не доставлено покупателю
-	TaskSent     TaskStatus = "sent"     // отправлено, ждёт ответа
-	TaskAccepted TaskStatus = "accepted" // принято, идёт отсчёт срока
-	TaskDeclined TaskStatus = "declined" // покупатель отказался
-	TaskReported TaskStatus = "reported" // отчёт получен
-	TaskExpired  TaskStatus = "expired"  // срок вышел без отчёта
-	TaskReviewed TaskStatus = "reviewed" // проверено админом
+	TaskCreated   TaskStatus = "created"   // создано, ещё не доставлено покупателю
+	TaskSent      TaskStatus = "sent"      // отправлено, ждёт ответа
+	TaskAccepted  TaskStatus = "accepted"  // принято, идёт отсчёт срока
+	TaskDeclined  TaskStatus = "declined"  // покупатель отказался
+	TaskReported  TaskStatus = "reported"  // отчёт получен
+	TaskExpired   TaskStatus = "expired"   // срок вышел без отчёта
+	TaskReviewed  TaskStatus = "reviewed"  // проверено админом
+	TaskCancelled TaskStatus = "cancelled" // отменено админом
 )
 
 // transitions единственный источник правды о допустимых сменах статуса.
 var transitions = map[TaskStatus][]TaskStatus{
 	TaskCreated:  {TaskSent},
 	TaskSent:     {TaskAccepted, TaskDeclined},
-	TaskAccepted: {TaskReported, TaskExpired},
-	TaskExpired:  {TaskReported}, // опоздавший отчёт всё равно принимаем
+	TaskAccepted: {TaskReported, TaskExpired, TaskCancelled},
+	TaskExpired:  {TaskReported, TaskCancelled}, // опоздавший отчёт всё равно принимаем
 	TaskReported: {TaskReviewed},
 }
 
@@ -44,13 +45,14 @@ func (s TaskStatus) IsActive() bool {
 }
 
 var taskStatusTitles = map[TaskStatus]string{
-	TaskCreated:  "создано",
-	TaskSent:     "отправлено",
-	TaskAccepted: "принято",
-	TaskDeclined: "отказ",
-	TaskReported: "отчёт получен",
-	TaskExpired:  "просрочено",
-	TaskReviewed: "проверено",
+	TaskCreated:   "создано",
+	TaskSent:      "отправлено",
+	TaskAccepted:  "принято",
+	TaskDeclined:  "отказ",
+	TaskReported:  "отчёт получен",
+	TaskExpired:   "просрочено",
+	TaskReviewed:  "проверено",
+	TaskCancelled: "отменено",
 }
 
 // Title русское название статуса.

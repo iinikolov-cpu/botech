@@ -101,7 +101,7 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup = a.screenLog(ctx)
 	case "sc", "scv", "sca", "sct":
 		text, markup = a.scenarioCallback(ctx, b, admin, parts)
-	case "tk", "tc", "trv", "trs":
+	case "tk", "tc", "trv", "trs", "tdl", "tdy", "tcl", "tcy":
 		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
 	case "as":
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)

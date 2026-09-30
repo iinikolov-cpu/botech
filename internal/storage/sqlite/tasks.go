@@ -170,3 +170,30 @@ func (r *taskRepo) Events(ctx context.Context, taskID int64) ([]*domain.TaskEven
 	}
 	return out, rows.Err()
 }
+
+func (r *taskRepo) DeleteUnstarted(ctx context.Context, id int64) (bool, error) {
+	// Сначала само задание с условием по статусу, и только если оно удалено, чистим историю.
+	// Порядок «история, потом задание» нарушил бы внешний ключ, поэтому проверяем статус заранее.
+	var st string
+	err := r.q.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, id).Scan(&st)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch domain.TaskStatus(st) {
+	case domain.TaskCreated, domain.TaskSent, domain.TaskDeclined:
+	default:
+		return false, nil
+	}
+	if _, err := r.q.ExecContext(ctx, `DELETE FROM task_events WHERE task_id = ?`, id); err != nil {
+		return false, err
+	}
+	res, err := r.q.ExecContext(ctx, `DELETE FROM tasks WHERE id = ? AND status IN ('created','sent','declined')`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}

@@ -3,16 +3,18 @@ package domain
 import "testing"
 
 func TestCanTransition(t *testing.T) {
-	all := []TaskStatus{TaskCreated, TaskSent, TaskAccepted, TaskDeclined, TaskReported, TaskExpired, TaskReviewed}
+	all := []TaskStatus{TaskCreated, TaskSent, TaskAccepted, TaskDeclined, TaskReported, TaskExpired, TaskReviewed, TaskCancelled}
 	// Полный список разрешённых переходов; всё остальное должно быть запрещено.
 	allowed := map[[2]TaskStatus]bool{
-		{TaskCreated, TaskSent}:      true,
-		{TaskSent, TaskAccepted}:     true,
-		{TaskSent, TaskDeclined}:     true,
-		{TaskAccepted, TaskReported}: true,
-		{TaskAccepted, TaskExpired}:  true,
-		{TaskExpired, TaskReported}:  true,
-		{TaskReported, TaskReviewed}: true,
+		{TaskCreated, TaskSent}:       true,
+		{TaskSent, TaskAccepted}:      true,
+		{TaskSent, TaskDeclined}:      true,
+		{TaskAccepted, TaskReported}:  true,
+		{TaskAccepted, TaskExpired}:   true,
+		{TaskAccepted, TaskCancelled}: true,
+		{TaskExpired, TaskCancelled}:  true,
+		{TaskExpired, TaskReported}:   true,
+		{TaskReported, TaskReviewed}:  true,
 	}
 	for _, from := range all {
 		for _, to := range all {
@@ -27,7 +29,7 @@ func TestCanTransition(t *testing.T) {
 func TestIsActive(t *testing.T) {
 	tests := map[TaskStatus]bool{
 		TaskCreated: true, TaskSent: true, TaskAccepted: true, TaskExpired: true,
-		TaskDeclined: false, TaskReported: false, TaskReviewed: false,
+		TaskDeclined: false, TaskReported: false, TaskReviewed: false, TaskCancelled: false,
 	}
 	for s, want := range tests {
 		if got := s.IsActive(); got != want {

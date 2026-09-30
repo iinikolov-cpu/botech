@@ -71,6 +71,8 @@ func (s *Reports) CanReport(ctx context.Context, userID, taskID int64) (*TaskCar
 		return card, nil
 	case domain.TaskReported, domain.TaskReviewed:
 		return card, ErrAlreadyReported
+	case domain.TaskCancelled:
+		return card, fmt.Errorf("%w: задание отменено администратором", ErrForbidden)
 	}
 	return card, fmt.Errorf("%w: отчёт можно отправить после принятия задания", ErrForbidden)
 }
@@ -140,6 +142,8 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 		case domain.TaskAccepted, domain.TaskExpired:
 		case domain.TaskReported, domain.TaskReviewed:
 			return ErrAlreadyReported
+		case domain.TaskCancelled:
+			return fmt.Errorf("%w: задание отменено администратором", ErrForbidden)
 		default:
 			return fmt.Errorf("%w: отчёт можно отправить после принятия задания", ErrForbidden)
 		}

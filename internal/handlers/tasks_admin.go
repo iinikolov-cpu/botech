@@ -19,7 +19,7 @@ var taskFilters = map[string][]domain.TaskStatus{
 	"p": {domain.TaskAccepted},
 	"r": {domain.TaskReported},
 	"o": {domain.TaskExpired},
-	"f": {domain.TaskDeclined, domain.TaskReviewed},
+	"f": {domain.TaskDeclined, domain.TaskReviewed, domain.TaskCancelled},
 }
 
 // taskAdminCallback экраны заданий: adm:tk:<фильтр>:<стр>, adm:tc:<id>, adm:trv:<id>, adm:trs:<id>.
@@ -43,6 +43,49 @@ func (a *App) taskAdminCallback(ctx context.Context, b *bot.Bot, admin *domain.U
 			toast = "Ошибка, подробности в логах"
 		} else if !changed {
 			toast = "Отметить проверенным можно только задание с полученным отчётом"
+		}
+		t, m := a.screenTask(ctx, id)
+		return t, m, toast
+	case "tdl": // подтверждение удаления
+		c, err := a.tasks.Card(ctx, id)
+		if err != nil {
+			t, m := a.screenTasks(ctx, "a", 0)
+			return t, m, "Задание не найдено"
+		}
+		text := fmt.Sprintf("Удалить задание #%d («%s», %s)?\nОно исчезнет из списков вместе с историей. Восстановить нельзя.",
+			id, esc(c.Version.Body.Title), userLabel(c.User))
+		return text, kb(row(btn("Да, удалить", "adm:tdy:"+itoa(id)), btn("Отмена", "adm:tc:"+itoa(id)))), ""
+	case "tdy":
+		if err := a.tasks.Delete(ctx, admin.TgID, id); err != nil {
+			t, m := a.screenTask(ctx, id)
+			return t, m, errText(err)
+		}
+		a.log.Info("задание удалено", "admin", maskID(admin.TgID), "task", id)
+		t, m := a.screenTasks(ctx, "a", 0)
+		return t, m, "Задание удалено"
+	case "tcl": // подтверждение отмены
+		c, err := a.tasks.Card(ctx, id)
+		if err != nil {
+			t, m := a.screenTasks(ctx, "a", 0)
+			return t, m, "Задание не найдено"
+		}
+		text := fmt.Sprintf("Отменить задание #%d («%s», %s)?\nПокупатель получит уведомление и больше не сможет отправить отчёт. Задание останется в истории со статусом «отменено».",
+			id, esc(c.Version.Body.Title), userLabel(c.User))
+		return text, kb(row(btn("Да, отменить", "adm:tcy:"+itoa(id)), btn("Назад", "adm:tc:"+itoa(id)))), ""
+	case "tcy":
+		toast := "Задание отменено"
+		changed, err := a.tasks.Cancel(ctx, admin.TgID, id)
+		switch {
+		case err != nil:
+			a.log.Error("отмена задания", "err", err)
+			toast = "Ошибка, подробности в логах"
+		case !changed:
+			toast = "Отменить можно только принятое или просроченное задание"
+		default:
+			if c, err := a.tasks.Card(ctx, id); err == nil {
+				a.send(ctx, b, c.User.TgID, fmt.Sprintf("Задание «%s» отменено администратором. Отправлять отчёт по нему больше не нужно.", esc(c.Version.Body.Title)), nil)
+			}
+			a.log.Info("задание отменено", "admin", maskID(admin.TgID), "task", id)
 		}
 		t, m := a.screenTask(ctx, id)
 		return t, m, toast
@@ -146,6 +189,12 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 		rows = append(rows, row(btn("🔁 Отправить повторно", "adm:trs:"+itoa(id))))
 	case domain.TaskReported:
 		rows = append(rows, row(btn("✅ Проверено", "adm:trv:"+itoa(id))))
+	}
+	switch c.Task.Status {
+	case domain.TaskCreated, domain.TaskSent, domain.TaskDeclined:
+		rows = append(rows, row(btn("🗑 Удалить задание", "adm:tdl:"+itoa(id))))
+	case domain.TaskAccepted, domain.TaskExpired:
+		rows = append(rows, row(btn("🚫 Отменить задание", "adm:tcl:"+itoa(id))))
 	}
 	if c.Task.Status == domain.TaskReported || c.Task.Status == domain.TaskReviewed {
 		rows = append(rows, row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(id))))

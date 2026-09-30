@@ -279,6 +279,50 @@ func (s *Tasks) transition(ctx context.Context, taskID, owner int64, to domain.T
 	return changed, err
 }
 
+// Delete полностью удаляет не начатое задание (создано, отправлено, отказ) с его историей.
+// Задания в работе отменяются (Cancel), задания с отчётом не удаляются: там данные для учёта и выплат.
+func (s *Tasks) Delete(ctx context.Context, admin, taskID int64) error {
+	return s.store.WithTx(ctx, func(r storage.Repos) error {
+		t, err := r.Tasks.Get(ctx, taskID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		switch t.Status {
+		case domain.TaskCreated, domain.TaskSent, domain.TaskDeclined:
+		case domain.TaskAccepted, domain.TaskExpired:
+			return fmt.Errorf("%w: задание в работе нельзя удалить, его можно отменить", ErrForbidden)
+		default:
+			return fmt.Errorf("%w: задание с отчётом не удаляется, данные нужны для учёта", ErrForbidden)
+		}
+		ok, err := r.Tasks.DeleteUnstarted(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		return r.Audit.Add(ctx, &domain.AuditEntry{
+			AdminID: admin, Action: "task.delete", Entity: "task", EntityID: fmt.Sprint(taskID),
+			Details: fmt.Sprintf("user %d, статус %s", t.UserID, t.Status), At: s.now().UTC(),
+		})
+	})
+}
+
+// Cancel отменяет задание в работе (принято или просрочено). Выданный промокод остаётся
+// закреплённым за заданием: покупатель мог им воспользоваться.
+func (s *Tasks) Cancel(ctx context.Context, admin, taskID int64) (bool, error) {
+	changed, err := s.transition(ctx, taskID, 0, domain.TaskCancelled, "отменено админом", nil)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, s.store.Repos().Audit.Add(ctx, &domain.AuditEntry{
+		AdminID: admin, Action: "task.cancel", Entity: "task", EntityID: fmt.Sprint(taskID), At: s.now().UTC(),
+	})
+}
+
 // Card задание со сценарием, версией и покупателем.
 func (s *Tasks) Card(ctx context.Context, id int64) (*TaskCard, error) {
 	r := s.store.Repos()

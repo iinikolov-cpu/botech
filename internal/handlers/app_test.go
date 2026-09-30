@@ -563,3 +563,57 @@ func TestPromoDeleteFlow(t *testing.T) {
 		t.Fatalf("после удаления всех: %q", got)
 	}
 }
+
+// Удаление и отмена заданий из админки.
+func TestTaskDeleteAndCancelFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", flowScenario)
+	assign := func() {
+		for _, d := range []string{"adm:as:0", "adm:as:s:1", "adm:as:d:3", "adm:as:t:2000:0", "adm:as:go"} {
+			e.click(testAdmin, d)
+		}
+	}
+
+	// Не принятое: кнопка удаления с подтверждением.
+	assign()
+	e.click(testAdmin, "adm:tc:1")
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:tdl:1") || strings.Contains(m.Markup, "adm:tcl:1") {
+		t.Fatalf("для отправленного нужна кнопка удаления: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:tdl:1")
+	if got := e.tg.last(); !strings.Contains(got, "Восстановить нельзя") {
+		t.Fatalf("нет подтверждения: %q", got)
+	}
+	e.click(testAdmin, "adm:tdy:1")
+	if got := e.tg.lastAnswer(); got != "Задание удалено" {
+		t.Fatalf("удаление: %q", got)
+	}
+	// Старые кнопки в чате покупателя после удаления не работают.
+	e.click(2000, "tsk:ac:1")
+	if got := e.tg.lastAnswer(); got != "Задание не найдено." {
+		t.Fatalf("кнопка удалённого задания: %q", got)
+	}
+
+	// Принятое: отмена, покупатель уведомлён.
+	assign()
+	e.click(2000, "tsk:ac:2")
+	e.click(testAdmin, "adm:tc:2")
+	m, _ = e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:tcl:2") || strings.Contains(m.Markup, "adm:tdl:2") {
+		t.Fatalf("для принятого нужна кнопка отмены: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:tcl:2")
+	e.click(testAdmin, "adm:tcy:2")
+	if got := e.tg.last(); !strings.Contains(got, "отменено") {
+		t.Fatalf("карточка после отмены: %q", got)
+	}
+	if n, _ := e.tg.lastTo(2000); !strings.Contains(n.Text, "отменено администратором") {
+		t.Fatalf("покупатель не уведомлён: %q", n.Text)
+	}
+	e.click(2000, "tsk:rp:2")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "отменено") {
+		t.Fatalf("отчёт по отменённому: %q", got)
+	}
+}

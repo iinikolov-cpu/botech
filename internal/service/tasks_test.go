@@ -363,3 +363,107 @@ func TestAcceptBeforeMarkSent(t *testing.T) {
 		t.Fatalf("статус после запоздалого MarkSent: %s", card.Task.Status)
 	}
 }
+
+func TestDeleteTask(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	sc := e.importScenario(t, scenarioYAML).Scenario
+
+	// Отправленное, но не принятое задание удаляется полностью, вместе с историей.
+	sent := e.assignOne(t, sc.ID, 1)
+	if err := e.tasks.Delete(ctx, firstAdmin, sent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.tasks.Card(ctx, sent); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("после удаления карточки быть не должно: %v", err)
+	}
+	if events, _ := e.tasks.Events(ctx, sent); len(events) != 0 {
+		t.Fatalf("история должна быть удалена, осталось %d событий", len(events))
+	}
+	// Слот освободился: сценарий можно назначить заново.
+	res, _ := e.tasks.Assign(ctx, firstAdmin, sc.ID, 3, []int64{1})
+	if len(res.Created) != 1 {
+		t.Fatal("после удаления задание можно назначить повторно")
+	}
+	if res.Created[0].ID <= sent {
+		t.Fatalf("номер удалённого задания %d переиспользован (новое #%d): старые кнопки в чатах могли бы сработать на чужое задание", sent, res.Created[0].ID)
+	}
+	// Удаление записано в журнал.
+	log, _ := e.access.AuditLog(ctx, 20)
+	found := false
+	for _, en := range log {
+		found = found || en.Action == "task.delete"
+	}
+	if !found {
+		t.Fatal("удаление должно попасть в журнал админов")
+	}
+
+	// Отказ тоже можно удалить.
+	declined := e.assignOne(t, sc.ID, 2)
+	if _, _, err := e.tasks.Decline(ctx, 2, declined); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.tasks.Delete(ctx, firstAdmin, declined); err != nil {
+		t.Fatalf("удаление отказа: %v", err)
+	}
+
+	// Принятое и с отчётом удалять нельзя.
+	accepted := e.acceptedTask(t, sc.ID, 3)
+	if err := e.tasks.Delete(ctx, firstAdmin, accepted); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("принятое задание: %v", err)
+	}
+	if _, err := e.reports().Submit(ctx, 3, accepted, SubmitInput{Answers: nil}); err == nil {
+		// в сценарии один обязательный вопрос, пустой отчёт должен быть отклонён
+		t.Fatal("пустой отчёт принят")
+	}
+	if err := e.tasks.Delete(ctx, firstAdmin, 99999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("несуществующее: %v", err)
+	}
+}
+
+func TestCancelTask(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.addCodes(t, 1)
+	sc := e.importScenario(t, scenarioYAML).Scenario
+
+	// Не принятое задание отменить нельзя (его удаляют).
+	sent := e.assignOne(t, sc.ID, 1)
+	if ok, err := e.tasks.Cancel(ctx, firstAdmin, sent); err != nil || ok {
+		t.Fatalf("отмена неприятого: ok=%v err=%v", ok, err)
+	}
+
+	card, _, _ := e.tasks.Accept(ctx, 1, sent)
+	promo := card.Promo.Code
+	ok, err := e.tasks.Cancel(ctx, firstAdmin, sent)
+	if err != nil || !ok {
+		t.Fatalf("отмена принятого: ok=%v err=%v", ok, err)
+	}
+	card, _ = e.tasks.Card(ctx, sent)
+	if card.Task.Status != domain.TaskCancelled || card.Promo == nil || card.Promo.Code != promo {
+		t.Fatalf("после отмены: статус=%s, промокод должен остаться за заданием: %+v", card.Task.Status, card.Promo)
+	}
+	if ok, _ := e.tasks.Cancel(ctx, firstAdmin, sent); ok {
+		t.Fatal("повторная отмена не должна срабатывать")
+	}
+	// Отчёт по отменённому заданию отправить нельзя, а слот освободился.
+	if _, err := e.reports().Submit(ctx, 1, sent, SubmitInput{}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("отчёт по отменённому: %v", err)
+	}
+	if _, err := e.reports().CanReport(ctx, 1, sent); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("CanReport отменённого: %v", err)
+	}
+	if res, _ := e.tasks.Assign(ctx, firstAdmin, sc.ID, 3, []int64{1}); len(res.Created) != 1 {
+		t.Fatal("после отмены сценарий можно назначить снова")
+	}
+	// Удалять отменённое нельзя: в истории остаются данные учёта.
+	if err := e.tasks.Delete(ctx, firstAdmin, sent); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("удаление отменённого: %v", err)
+	}
+	// Задание с отчётом не отменяется.
+	e2 := e.acceptedTask(t, sc.ID, 2)
+	e.reportOK(t, 2, e2)
+	if ok, _ := e.tasks.Cancel(ctx, firstAdmin, e2); ok {
+		t.Fatal("задание с отчётом отменять нельзя")
+	}
+}
