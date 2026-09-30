@@ -28,6 +28,12 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 		fmt.Fprintf(&sb, "ПВЗ: %s\n", esc(body.PVZ))
 	}
 	fmt.Fprintf(&sb, "Статус: %s\n", t.Status.Title())
+	if t.Status == domain.TaskRework && c.Report != nil && c.Report.AdminComment != "" {
+		sb.WriteString("\n" + i18n.T(l, "task_rework_head", esc(c.Report.AdminComment)) + "\n\n")
+	}
+	if c.Comp != nil && c.Comp.Status == domain.CompRejected {
+		sb.WriteString("\n" + i18n.T(l, "comp_rejected", esc(c.Comp.AdminComment)) + "\n\n")
+	}
 	switch {
 	case !t.DueAt.IsZero():
 		fmt.Fprintf(&sb, "Выполнить до: <b>%s</b>\n", a.fmtTime(t.DueAt))
@@ -56,6 +62,11 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 			rows = append(rows, row(btn(i18n.T(l, "btn_get_promo"), "tsk:pc:"+id)))
 		}
 		rows = append(rows, row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))
+	case domain.TaskRework:
+		rows = append(rows, row(btn(i18n.T(l, "btn_fix_report"), "tsk:rp:"+id)))
+	}
+	if c.Comp != nil && c.Comp.Status == domain.CompRejected {
+		rows = append(rows, row(btn(i18n.T(l, "btn_fix_comp"), "tsk:cf:"+id)))
 	}
 	rows = append(rows, row(btn(i18n.T(l, "btn_back_list"), "tsk:l")))
 	return sb.String(), kb(rows...)
@@ -82,7 +93,7 @@ func (a *App) screenBuyerTasks(ctx context.Context, u *domain.User) (string, *mo
 	}
 	var rows [][]models.InlineKeyboardButton
 	for _, c := range list {
-		label := fmt.Sprintf("%s · %s", c.Version.Body.Title, c.Task.Status.Title())
+		label := fmt.Sprintf("#%d %s · %s", c.Task.ID, c.Version.Body.Title, c.Task.Status.Title())
 		rows = append(rows, row(btn(cut(label, 60), "tsk:v:"+itoa(c.Task.ID))))
 	}
 	return i18n.T(l, "tasks_title"), kb(rows...)
@@ -123,6 +134,9 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 		a.answerCB(ctx, b, cb.ID, "", false)
 	case "rp":
 		a.startReport(ctx, b, u, cb, id)
+		return
+	case "cf": // исправить данные отклонённой компенсации
+		a.startCompFix(ctx, b, u, cb, id)
 		return
 	case "pc": // получить промокод, если при принятии пул был пуст
 		got, err := a.tasks.IssuePromo(ctx, u.TgID, id)

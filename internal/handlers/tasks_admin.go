@@ -10,16 +10,19 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"botech/internal/domain"
+	"botech/internal/storage"
 )
 
-// Фильтры списка заданий: буква в callback -> набор статусов (пусто = все).
-var taskFilters = map[string][]domain.TaskStatus{
-	"a": nil,
-	"w": {domain.TaskCreated, domain.TaskSent},
-	"p": {domain.TaskAccepted},
-	"r": {domain.TaskReported},
-	"o": {domain.TaskExpired},
-	"f": {domain.TaskDeclined, domain.TaskReviewed, domain.TaskCancelled},
+// Фильтры списка заданий: буква в callback -> условия выборки.
+// «Отчёты» включают и принятые, но ещё не закрытые по компенсации: пока её не выплатили
+// (или она отклонена и ждёт исправления), задание остаётся в этом списке.
+var taskFilters = map[string]storage.TaskFilter{
+	"a": {},
+	"w": {Statuses: []domain.TaskStatus{domain.TaskCreated, domain.TaskSent}},
+	"p": {Statuses: []domain.TaskStatus{domain.TaskAccepted}},
+	"r": {Statuses: []domain.TaskStatus{domain.TaskReported, domain.TaskRework}, ReviewedMode: storage.ReviewedOpenComp},
+	"o": {Statuses: []domain.TaskStatus{domain.TaskExpired}},
+	"f": {Statuses: []domain.TaskStatus{domain.TaskDeclined, domain.TaskCancelled}, ReviewedMode: storage.ReviewedSettled},
 }
 
 // taskAdminCallback экраны заданий: adm:tk:<фильтр>:<стр>, adm:tc:<id>, adm:trv:<id>, adm:trs:<id>.
@@ -103,14 +106,14 @@ func (a *App) taskAdminCallback(ctx context.Context, b *bot.Bot, admin *domain.U
 }
 
 func (a *App) screenTasks(ctx context.Context, filter string, page int) (string, *models.InlineKeyboardMarkup) {
-	statuses, ok := taskFilters[filter]
+	f, ok := taskFilters[filter]
 	if !ok {
 		filter = "a"
 	}
 	if page < 0 {
 		page = 0
 	}
-	list, total, err := a.tasks.Page(ctx, statuses, pageSize, page*pageSize)
+	list, total, err := a.tasks.Page(ctx, f, pageSize, page*pageSize)
 	if err != nil {
 		a.log.Error("список заданий", "err", err)
 		return "Не удалось загрузить список.", kb(row(btn("« Назад", "adm:home")))
@@ -172,8 +175,14 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 		}[c.Promo.Outcome]
 		fmt.Fprintf(&sb, "Промокод: <code>%s</code> (%s)\n", esc(c.Promo.Code), state)
 	}
+	if c.Report != nil {
+		fmt.Fprintf(&sb, "Отчёт: версия %d от %s\n", c.Report.Revision, a.fmtTime(c.Report.SubmittedAt))
+		if c.Report.Decision == domain.ReportRework && c.Report.AdminComment != "" {
+			fmt.Fprintf(&sb, "Возвращён на доработку: <i>%s</i>\n", esc(cut(c.Report.AdminComment, 300)))
+		}
+	}
 	if c.Comp != nil {
-		fmt.Fprintf(&sb, "Компенсация: %s сум (%s)\n", fmtMoney(c.Comp.Amount), map[domain.CompStatus]string{domain.CompPending: "к выплате", domain.CompPaid: "выплачено"}[c.Comp.Status])
+		fmt.Fprintf(&sb, "Компенсация: %s сум (%s)\n", fmtMoney(c.Comp.Amount), compStatusTitle[c.Comp.Status])
 	}
 
 	events, _ := a.tasks.Events(ctx, id)
@@ -194,11 +203,14 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	switch c.Task.Status {
 	case domain.TaskCreated, domain.TaskSent, domain.TaskDeclined:
 		rows = append(rows, row(btn("🗑 Удалить задание", "adm:tdl:"+itoa(id))))
-	case domain.TaskAccepted, domain.TaskExpired:
+	case domain.TaskAccepted, domain.TaskExpired, domain.TaskRework:
 		rows = append(rows, row(btn("🚫 Отменить задание", "adm:tcl:"+itoa(id))))
 	}
-	if c.Task.Status == domain.TaskReported || c.Task.Status == domain.TaskReviewed {
+	if c.Report != nil {
 		rows = append(rows, row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(id))))
+	}
+	if c.Comp != nil {
+		rows = append(rows, row(btn("💰 Компенсация", "adm:cc:"+itoa(c.Comp.ID))))
 	}
 	rows = append(rows, row(btn("« К заданиям", "adm:tk:a:0")))
 	return sb.String(), kb(rows...)
@@ -216,6 +228,12 @@ func describeEvent(e *domain.TaskEvent) string {
 			s += " (" + e.Details + ")"
 		}
 		return s
+	case "compensation_rejected":
+		return "компенсация отклонена, " + e.Details
+	case "compensation_resubmitted":
+		return "покупатель исправил данные компенсации"
+	case "promo_used":
+		return "использование промокода засчитано"
 	case "promo_issued":
 		return "выдан промокод"
 	case "promo_missing":
@@ -435,8 +453,8 @@ func (a *App) assignExecute(ctx context.Context, b *bot.Bot, admin *domain.User,
 	if len(failed) > 0 {
 		fmt.Fprintf(&sb, "\n⚠ Не доставлено (%d): %s\nЗадание создано, отправить повторно можно из карточки задания.\n", len(failed), esc(strings.Join(failed, ", ")))
 	}
-	if len(res.Skipped) > 0 {
-		fmt.Fprintf(&sb, "\nПропущено, у них уже есть незавершённое задание по этому сценарию (%d): %s\n", len(res.Skipped), esc(a.names(ctx, res.Skipped)))
+	if len(res.Repeat) > 0 {
+		fmt.Fprintf(&sb, "\nℹ У них уже было незавершённое задание по этому сценарию, выдано ещё одно (%d): %s\n", len(res.Repeat), esc(a.names(ctx, res.Repeat)))
 	}
 	if len(res.Invalid) > 0 {
 		fmt.Fprintf(&sb, "\nНедоступны (заблокированы или не покупатели) (%d): %s\n", len(res.Invalid), esc(a.names(ctx, res.Invalid)))

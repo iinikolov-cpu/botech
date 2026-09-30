@@ -69,7 +69,7 @@ func (s *Reports) CanReport(ctx context.Context, userID, taskID int64) (*TaskCar
 		return nil, ErrNotFound
 	}
 	switch card.Task.Status {
-	case domain.TaskAccepted, domain.TaskExpired:
+	case domain.TaskAccepted, domain.TaskExpired, domain.TaskRework:
 		return card, nil
 	case domain.TaskReported, domain.TaskReviewed:
 		return card, ErrAlreadyReported
@@ -141,7 +141,7 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			return err
 		}
 		switch t.Status {
-		case domain.TaskAccepted, domain.TaskExpired:
+		case domain.TaskAccepted, domain.TaskExpired, domain.TaskRework:
 		case domain.TaskReported, domain.TaskReviewed:
 			return ErrAlreadyReported
 		case domain.TaskCancelled:
@@ -167,7 +167,9 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 		}
 
 		now := s.now().UTC()
-		late := t.Status == domain.TaskExpired || (!t.DueAt.IsZero() && now.After(t.DueAt))
+		// Срок проверяется только для первой отправки; исправление по замечанию админа не считается опозданием.
+		rework := t.Status == domain.TaskRework
+		late := !rework && (t.Status == domain.TaskExpired || (!t.DueAt.IsZero() && now.After(t.DueAt)))
 		rep := &domain.Report{TaskID: taskID, UserID: userID, Late: late, SubmittedAt: now, Answers: answers}
 		if err := r.Reports.Create(ctx, rep); err != nil {
 			if errors.Is(err, storage.ErrDuplicate) {
@@ -176,17 +178,8 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			return err
 		}
 		if in.Comp != nil {
-			c := &domain.Compensation{
-				TaskID: taskID, UserID: userID, Amount: in.Comp.Amount,
-				ReceiptFileID: in.Comp.ReceiptFileID, ReceiptUniqueID: in.Comp.ReceiptUniqueID, CreatedAt: now,
-			}
-			if err := r.Comps.Create(ctx, c); err != nil {
+			if err := saveCompensation(ctx, r, taskID, userID, in.Comp, now, &res.DupReceipt); err != nil {
 				return err
-			}
-			if dup, found, err := r.Comps.FindByReceipt(ctx, c.ReceiptUniqueID, taskID); err != nil {
-				return err
-			} else if found {
-				res.DupReceipt = dup
 			}
 		}
 		ok, err := r.Tasks.Transition(ctx, taskID, t.Status, domain.TaskReported, now, time.Time{})
@@ -197,8 +190,11 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			return ErrAlreadyReported // параллельный запрос успел раньше
 		}
 		details := ""
-		if late {
+		switch {
+		case late:
 			details = "с опозданием"
+		case rework:
+			details = fmt.Sprintf("версия отчёта %d, после доработки", rep.Revision)
 		}
 		res.Late, res.Report = late, rep
 
@@ -310,4 +306,172 @@ func (s *Reports) MarkPaid(ctx context.Context, admin, id int64) (bool, error) {
 		})
 	})
 	return changed, err
+}
+
+// saveCompensation создаёт компенсацию или заменяет данные у ещё не выплаченной
+// (например, отклонённой). Уже выплаченную компенсацию не трогает.
+func saveCompensation(ctx context.Context, r storage.Repos, taskID, userID int64, in *CompInput, now time.Time, dup *int64) error {
+	existing, err := r.Comps.ByTask(ctx, taskID)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		c := &domain.Compensation{
+			TaskID: taskID, UserID: userID, Amount: in.Amount,
+			ReceiptFileID: in.ReceiptFileID, ReceiptUniqueID: in.ReceiptUniqueID, CreatedAt: now,
+		}
+		if err := r.Comps.Create(ctx, c); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	case existing.Status == domain.CompPaid:
+		return nil // уже выплачено, новые данные не нужны
+	default:
+		if _, err := r.Comps.UpdateData(ctx, taskID, in.Amount, in.ReceiptFileID, in.ReceiptUniqueID); err != nil {
+			return err
+		}
+	}
+	other, found, err := r.Comps.FindByReceipt(ctx, in.ReceiptUniqueID, taskID)
+	if err != nil {
+		return err
+	}
+	if found {
+		*dup = other
+	}
+	return nil
+}
+
+// MaxCommentLen предельная длина комментария админа.
+const MaxCommentLen = 1000
+
+// cleanComment проверяет свободный комментарий админа.
+func cleanComment(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	n := utf8.RuneCountInString(s)
+	if n == 0 {
+		return "", fmt.Errorf("%w: комментарий не может быть пустым", ErrInvalidReport)
+	}
+	if n > MaxCommentLen {
+		return "", fmt.Errorf("%w: комментарий слишком длинный (максимум %d символов)", ErrInvalidReport, MaxCommentLen)
+	}
+	return s, nil
+}
+
+// ReturnForRework возвращает отчёт покупателю на доработку со свободным комментарием.
+// Доступно только для отчёта, ожидающего проверки. changed=false, если статус уже другой.
+func (s *Reports) ReturnForRework(ctx context.Context, admin, taskID int64, comment string) (*TaskCard, bool, error) {
+	comment, err := cleanComment(comment)
+	if err != nil {
+		return nil, false, err
+	}
+	changed := false
+	err = s.store.WithTx(ctx, func(r storage.Repos) error {
+		t, err := r.Tasks.Get(ctx, taskID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if t.Status != domain.TaskReported {
+			return nil
+		}
+		now := s.now().UTC()
+		ok, err := r.Tasks.Transition(ctx, taskID, domain.TaskReported, domain.TaskRework, now, time.Time{})
+		if err != nil || !ok {
+			return err
+		}
+		changed = true
+		if err := r.Reports.SetDecision(ctx, taskID, domain.ReportRework, comment, admin, now); err != nil {
+			return err
+		}
+		if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{
+			TaskID: taskID, Kind: "status", FromStatus: domain.TaskReported, ToStatus: domain.TaskRework,
+			ActorID: admin, Details: "комментарий: " + comment, At: now,
+		}); err != nil {
+			return err
+		}
+		return r.Audit.Add(ctx, &domain.AuditEntry{
+			AdminID: admin, Action: "report.rework", Entity: "task", EntityID: fmt.Sprint(taskID), At: now,
+		})
+	})
+	if err != nil || !changed {
+		return nil, changed, err
+	}
+	card, err := s.tasks.Card(ctx, taskID)
+	return card, true, err
+}
+
+// RejectCompensation отклоняет компенсацию (не выплачивать, пока покупатель не исправит данные).
+// Возможно только для компенсации «к выплате». changed=false, если статус уже другой.
+func (s *Reports) RejectCompensation(ctx context.Context, admin, compID int64, comment string) (*CompCard, bool, error) {
+	comment, err := cleanComment(comment)
+	if err != nil {
+		return nil, false, err
+	}
+	changed := false
+	err = s.store.WithTx(ctx, func(r storage.Repos) error {
+		c, err := r.Comps.Get(ctx, compID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		ok, err := r.Comps.Reject(ctx, compID, comment)
+		if err != nil || !ok {
+			return err
+		}
+		changed = true
+		now := s.now().UTC()
+		if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{
+			TaskID: c.TaskID, Kind: "compensation_rejected", ActorID: admin, Details: "комментарий: " + comment, At: now,
+		}); err != nil {
+			return err
+		}
+		return r.Audit.Add(ctx, &domain.AuditEntry{
+			AdminID: admin, Action: "compensation.reject", Entity: "compensation", EntityID: fmt.Sprint(compID), At: now,
+		})
+	})
+	if err != nil || !changed {
+		return nil, changed, err
+	}
+	cc, err := s.CompCardByID(ctx, compID)
+	return cc, true, err
+}
+
+// ResubmitCompensation покупатель присылает исправленные сумму и чек для отклонённой компенсации.
+func (s *Reports) ResubmitCompensation(ctx context.Context, userID, taskID int64, in CompInput) (dupReceipt int64, err error) {
+	if in.Amount < 1 || in.Amount > MaxCompAmount {
+		return 0, fmt.Errorf("%w: сумма должна быть от 1 до %d", ErrInvalidReport, MaxCompAmount)
+	}
+	if in.ReceiptFileID == "" {
+		return 0, fmt.Errorf("%w: нужно фото чека", ErrInvalidReport)
+	}
+	err = s.store.WithTx(ctx, func(r storage.Repos) error {
+		t, err := r.Tasks.Get(ctx, taskID)
+		if errors.Is(err, storage.ErrNotFound) || (err == nil && t.UserID != userID) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		c, err := r.Comps.ByTask(ctx, taskID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if c.Status != domain.CompRejected {
+			return fmt.Errorf("%w: компенсацию можно исправить только после отклонения", ErrForbidden)
+		}
+		now := s.now().UTC()
+		if err := saveCompensation(ctx, r, taskID, userID, &in, now, &dupReceipt); err != nil {
+			return err
+		}
+		return r.Tasks.AddEvent(ctx, &domain.TaskEvent{
+			TaskID: taskID, Kind: "compensation_resubmitted", ActorID: userID, Details: "покупатель исправил данные компенсации", At: now,
+		})
+	})
+	return dupReceipt, err
 }

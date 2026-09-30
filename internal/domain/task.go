@@ -14,6 +14,7 @@ const (
 	TaskExpired   TaskStatus = "expired"   // срок вышел без отчёта
 	TaskReviewed  TaskStatus = "reviewed"  // проверено админом
 	TaskCancelled TaskStatus = "cancelled" // отменено админом
+	TaskRework    TaskStatus = "rework"    // отчёт возвращён на доработку
 )
 
 // transitions единственный источник правды о допустимых сменах статуса.
@@ -22,7 +23,8 @@ var transitions = map[TaskStatus][]TaskStatus{
 	TaskSent:     {TaskAccepted, TaskDeclined},
 	TaskAccepted: {TaskReported, TaskExpired, TaskCancelled},
 	TaskExpired:  {TaskReported, TaskCancelled}, // опоздавший отчёт всё равно принимаем
-	TaskReported: {TaskReviewed},
+	TaskReported: {TaskReviewed, TaskRework},
+	TaskRework:   {TaskReported, TaskCancelled}, // покупатель исправил отчёт / админ отменил
 }
 
 // CanTransition можно ли перейти из from в to.
@@ -38,7 +40,7 @@ func CanTransition(from, to TaskStatus) bool {
 // IsActive задание не завершено (блокирует повторную выдачу того же сценария).
 func (s TaskStatus) IsActive() bool {
 	switch s {
-	case TaskCreated, TaskSent, TaskAccepted, TaskExpired:
+	case TaskCreated, TaskSent, TaskAccepted, TaskExpired, TaskRework:
 		return true
 	}
 	return false
@@ -53,6 +55,7 @@ var taskStatusTitles = map[TaskStatus]string{
 	TaskExpired:   "просрочено",
 	TaskReviewed:  "проверено",
 	TaskCancelled: "отменено",
+	TaskRework:    "на доработке",
 }
 
 // Title русское название статуса.

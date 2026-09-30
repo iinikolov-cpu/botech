@@ -53,22 +53,34 @@ type Answer struct {
 	Skipped      bool         `json:"skipped,omitempty"`
 }
 
-// Report отчёт по заданию.
+// Решение админа по отчёту.
+const (
+	ReportPending  = ""         // ещё не рассмотрен
+	ReportAccepted = "accepted" // принят (задание «проверено»)
+	ReportRework   = "rework"   // возвращён на доработку
+)
+
+// Report отчёт по заданию. После доработки появляется новая версия (Revision), старые хранятся.
 type Report struct {
-	ID          int64
-	TaskID      int64
-	UserID      int64
-	Late        bool // отправлен после срока
-	SubmittedAt time.Time
-	Answers     []Answer
+	ID           int64
+	TaskID       int64
+	UserID       int64
+	Revision     int  // номер версии отчёта: 1, 2, ...
+	Late         bool // отправлен после срока
+	SubmittedAt  time.Time
+	Decision     string // ReportPending, ReportAccepted, ReportRework
+	AdminComment string // комментарий админа при возврате на доработку
+	DecidedAt    time.Time
+	Answers      []Answer
 }
 
 // CompStatus статус компенсации.
 type CompStatus string
 
 const (
-	CompPending CompStatus = "pending" // к выплате
-	CompPaid    CompStatus = "paid"
+	CompPending  CompStatus = "pending" // к выплате
+	CompPaid     CompStatus = "paid"
+	CompRejected CompStatus = "rejected" // данные неверны, покупателю нужно исправить
 )
 
 // Compensation данные для компенсации стоимости товара.
@@ -80,6 +92,7 @@ type Compensation struct {
 	ReceiptFileID   string
 	ReceiptUniqueID string
 	Status          CompStatus
+	AdminComment    string // причина отклонения
 	CreatedAt       time.Time
 	PaidAt          time.Time
 	PaidBy          int64

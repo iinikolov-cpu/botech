@@ -79,7 +79,17 @@ func (f *fakeTG) handler(w http.ResponseWriter, r *http.Request) {
 		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["text"], Markup: form["reply_markup"]})
 	case "sendPhoto", "sendVideo":
 		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
-		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["caption"]})
+		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["caption"], Markup: form["reply_markup"]})
+	case "sendMediaGroup":
+		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
+		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["media"]})
+		f.mu.Unlock()
+		// Telegram отвечает массивом сообщений альбома.
+		_, _ = w.Write([]byte(`{"ok":true,"result":[{"message_id":1,"date":1,"chat":{"id":1,"type":"private"}},{"message_id":2,"date":1,"chat":{"id":1,"type":"private"}}]}`))
+		return
+	case "editMessageCaption":
+		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
+		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["caption"], Markup: form["reply_markup"]})
 	case "answerCallbackQuery":
 		f.answers = append(f.answers, form["text"])
 	case "getFile":
@@ -123,6 +133,16 @@ func (f *fakeTG) anyTo(chat int64, substr string) bool {
 		}
 	}
 	return false
+}
+
+// lastMsg последнее отправленное сообщение целиком.
+func (f *fakeTG) lastMsg() sentMsg {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sent) == 0 {
+		return sentMsg{}
+	}
+	return f.sent[len(f.sent)-1]
 }
 
 func (f *fakeTG) lastAnswer() string {
@@ -537,7 +557,7 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 		t.Fatalf("таблица после выполнения: %q", got)
 	}
 	// Задание можно отметить проверенным.
-	e.click(testAdmin, "adm:rv:1:ok")
+	e.click(testAdmin, "adm:rr:1:ok")
 	e.click(testAdmin, "adm:tc:1")
 	if got := e.tg.last(); !strings.Contains(got, "проверено") {
 		t.Fatalf("карточка после проверки: %q", got)
@@ -724,5 +744,269 @@ func TestPromoReuseWarningsAndTable(t *testing.T) {
 	e.click(testAdmin, "adm:pr")
 	if got := e.tg.last(); !strings.Contains(got, "Нет ни одного кода со свободными использованиями") || !strings.Contains(got, "Исчерпаны: 1") {
 		t.Fatalf("сводка после исчерпания: %q", got)
+	}
+}
+
+// clickOnPhoto нажатие кнопки под сообщением-фото (карточка компенсации).
+func (e *testEnv) clickOnPhoto(from int64, data string) {
+	e.b.ProcessUpdate(context.Background(), &models.Update{ID: 1, CallbackQuery: &models.CallbackQuery{
+		ID: "cb", From: models.User{ID: from, FirstName: "Тест"}, Data: data,
+		Message: models.MaybeInaccessibleMessage{
+			Type: models.MaybeInaccessibleMessageTypeMessage,
+			Message: &models.Message{ID: 11, Chat: models.Chat{ID: from, Type: models.ChatTypePrivate},
+				Photo: []models.PhotoSize{{FileID: "x"}}},
+		},
+	}})
+}
+
+// lastMethods методы последних n сообщений чату (от старых к новым).
+func (f *fakeTG) methodsTo(chat int64) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, m := range f.sent {
+		if m.Chat == chat {
+			out = append(out, m.Method)
+		}
+	}
+	return out
+}
+
+// completeReportWithComp проходит мастер для reportFlowScenario с компенсацией.
+func (e *testEnv) completeReportWithComp(t *testing.T, user, taskID int64, amount string) {
+	t.Helper()
+	e.click(user, fmt.Sprintf("tsk:rp:%d", taskID))
+	e.press(t, user, "rpt:r:", ":5")
+	e.press(t, user, "rpt:y:", ":yes")
+	e.sendPhoto(user, "P-"+amount)
+	e.press(t, user, "rpt:s:", "")
+	e.press(t, user, "rpt:ca:", ":1")
+	e.say(user, amount)
+	e.sendPhoto(user, "RECEIPT-"+amount)
+	e.press(t, user, "rpt:ok:", "")
+}
+
+func (e *testEnv) assignTo(user int64, scenarioID int) {
+	for _, d := range []string{"adm:as:0", fmt.Sprintf("adm:as:s:%d", scenarioID), "adm:as:d:3", fmt.Sprintf("adm:as:t:%d:0", user), "adm:as:go"} {
+		e.click(testAdmin, d)
+	}
+}
+
+// Возврат отчёта на доработку с комментарием и повторная отправка.
+func TestReworkFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "150000")
+
+	// Кнопки решения есть в сообщении отчёта.
+	e.click(testAdmin, "adm:rv:1")
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:rr:1:ok") || !strings.Contains(m.Markup, "adm:rw:1") {
+		t.Fatalf("нет кнопок решения: %s", m.Markup)
+	}
+	// Отмена возврата ничего не меняет.
+	e.click(testAdmin, "adm:rw:1")
+	if got := e.tg.last(); !strings.Contains(got, "Напишите комментарий") {
+		t.Fatalf("запрос комментария: %q", got)
+	}
+	e.click(testAdmin, "adm:rwx:1")
+	e.say(testAdmin, "этот текст не должен уйти покупателю")
+	if e.tg.anyTo(2000, "не должен уйти") {
+		t.Fatal("после отмены комментарий не должен отправляться покупателю")
+	}
+
+	// Возврат со свободным комментарием.
+	e.click(testAdmin, "adm:rw:1")
+	e.say(testAdmin, "Фото посылки размыто, переснимите")
+	n, _ := e.tg.lastTo(2000)
+	if !strings.Contains(n.Text, "возвращён на доработку") || !strings.Contains(n.Text, "Фото посылки размыто") || !strings.Contains(n.Markup, "tsk:rp:1") {
+		t.Fatalf("покупатель не получил комментарий: %+v", n)
+	}
+	e.click(2000, "tsk:v:1")
+	if got := e.tg.last(); !strings.Contains(got, "на доработке") || !strings.Contains(got, "Фото посылки размыто") {
+		t.Fatalf("карточка у покупателя: %q", got)
+	}
+	// Повторно вернуть нельзя, отчёт теперь у покупателя.
+	e.click(testAdmin, "adm:rw:1")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "ожидающий проверки") {
+		t.Fatalf("повторный возврат: %q", got)
+	}
+
+	// Покупатель исправляет: сначала напоминание комментария, затем вопросы заново.
+	e.click(2000, "tsk:rp:1")
+	if !e.tg.anyTo(2000, "Комментарий администратора к отчёту") {
+		t.Fatal("перед доработкой нужно показать комментарий")
+	}
+	e.press(t, 2000, "rpt:r:", ":4")
+	e.press(t, 2000, "rpt:y:", ":yes")
+	e.sendPhoto(2000, "PHOTO-FIXED")
+	e.press(t, 2000, "rpt:s:", "")
+	e.press(t, 2000, "rpt:ca:", ":1")
+	e.say(2000, "160000")
+	e.sendPhoto(2000, "RECEIPT-FIXED")
+	e.press(t, 2000, "rpt:ok:", "")
+	if !e.tg.anyTo(testAdmin, "версия 2") && !e.tg.anyTo(testAdmin, "Получен отчёт") {
+		t.Fatal("админ не получил исправленный отчёт")
+	}
+	e.click(testAdmin, "adm:rv:1")
+	if got := e.tg.last(); !strings.Contains(got, "версия 2") || !strings.Contains(got, "160 000 сум") {
+		t.Fatalf("новая версия отчёта: %q", got)
+	}
+	// Принимаем отчёт: он остаётся в «Отчётах», пока компенсация не выплачена.
+	e.click(testAdmin, "adm:rr:1:ok")
+	e.click(testAdmin, "adm:tk:r:0")
+	if got := e.tg.last(); !strings.Contains(got, "найдено: 1") {
+		t.Fatalf("принятый, но не выплаченный отчёт должен оставаться в «Отчётах»: %q", got)
+	}
+	e.click(testAdmin, "adm:tk:f:0")
+	if got := e.tg.last(); !strings.Contains(got, "найдено: 0") {
+		t.Fatalf("не закрытое задание не должно быть в «Закрыто»: %q", got)
+	}
+	e.click(testAdmin, "adm:cpd:1")
+	e.click(testAdmin, "adm:cpy:1")
+	e.click(testAdmin, "adm:tk:r:0")
+	if got := e.tg.last(); !strings.Contains(got, "найдено: 0") {
+		t.Fatalf("после выплаты задание уходит из «Отчётов»: %q", got)
+	}
+	e.click(testAdmin, "adm:tk:f:0")
+	if got := e.tg.last(); !strings.Contains(got, "найдено: 1") {
+		t.Fatalf("после выплаты задание в «Закрыто»: %q", got)
+	}
+}
+
+// Отклонение компенсации: кнопки прямо под фото чека, комментарий, исправление покупателем.
+func TestCompensationRejectFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "150000")
+
+	// Компенсация открывается ОДНИМ сообщением: фото чека, а кнопки под ним.
+	before := len(e.tg.methodsTo(testAdmin))
+	e.click(testAdmin, "adm:cc:1")
+	ms := e.tg.methodsTo(testAdmin)[before:]
+	if len(ms) != 1 || ms[0] != "sendPhoto" {
+		t.Fatalf("карточка компенсации должна быть одним сообщением-фото, получили %v", ms)
+	}
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:cpd:1") || !strings.Contains(m.Markup, "adm:crj:1") || !strings.Contains(m.Text, "150 000 сум") {
+		t.Fatalf("кнопки под фото чека: %+v", m)
+	}
+
+	// Действия под фото меняют подпись, а не текст.
+	e.clickOnPhoto(testAdmin, "adm:crj:1")
+	if last := e.tg.lastMsg(); last.Method != "editMessageCaption" || !strings.Contains(last.Text, "Напишите комментарий") {
+		t.Fatalf("запрос комментария должен редактировать подпись: %+v", last)
+	}
+	e.say(testAdmin, "Сумма на чеке другая")
+	n, _ := e.tg.lastTo(2000)
+	if !strings.Contains(n.Text, "Компенсация") || !strings.Contains(n.Text, "Сумма на чеке другая") || !strings.Contains(n.Markup, "tsk:cf:1") {
+		t.Fatalf("покупатель не получил комментарий: %+v", n)
+	}
+	// Выплатить отклонённую нельзя.
+	e.click(testAdmin, "adm:cpd:1")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "Уже обработано") {
+		t.Fatalf("выплата отклонённой: %q", got)
+	}
+	e.click(testAdmin, "adm:cp:r:0")
+	if got := e.tg.last(); !strings.Contains(got, "Компенсации: отклонено, ждём исправления") || !strings.Contains(got, "Записей: 1") {
+		t.Fatalf("список отклонённых: %q", got)
+	}
+
+	// Покупатель исправляет сумму и чек.
+	e.click(2000, "tsk:v:1")
+	if got := e.tg.last(); !strings.Contains(got, "Сумма на чеке другая") {
+		t.Fatalf("комментарий не виден в карточке: %q", got)
+	}
+	e.click(2000, "tsk:cf:1")
+	if !e.tg.anyTo(2000, "Введите сумму") {
+		t.Fatal("нет запроса суммы")
+	}
+	e.say(2000, "120 000")
+	e.sendPhoto(2000, "RECEIPT-NEW")
+	m, _ = e.tg.lastTo(2000)
+	if !strings.Contains(m.Text, "120 000 сум") {
+		t.Fatalf("подтверждение: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:ok:", "")
+	if !e.tg.anyTo(2000, "Исправленные данные компенсации отправлены") {
+		t.Fatal("нет подтверждения покупателю")
+	}
+	if !e.tg.anyTo(testAdmin, "исправил данные компенсации") {
+		t.Fatal("админ не уведомлён об исправлении")
+	}
+	e.click(testAdmin, "adm:cp:w:0")
+	if got := e.tg.last(); !strings.Contains(got, "Записей: 1") || !strings.Contains(got, "120 000") {
+		t.Fatalf("исправленная компенсация снова к выплате: %q", got)
+	}
+	// Теперь выплата проходит.
+	e.click(testAdmin, "adm:cpy:1")
+	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "выплачена") {
+		t.Fatalf("уведомление о выплате: %q", m.Text)
+	}
+}
+
+const albumScenario = `key: album
+title: Много фото
+operator: BTS
+steps: [Шаг]
+questions:
+  - {key: p1, text: Фото один, type: photo}
+  - {key: p2, text: Фото два, type: photo}
+  - {key: p3, text: Фото три, type: photo}
+  - {key: note, text: Комментарий, type: text}
+`
+
+// Фото отчёта приходят альбомом, а сообщение с кнопками решения всегда последнее.
+func TestReportMediaBeforeButtons(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "album.yaml", albumScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.click(2000, "tsk:rp:1")
+	e.sendPhoto(2000, "A1")
+	e.sendPhoto(2000, "A2")
+	e.sendPhoto(2000, "A3")
+	e.say(2000, "всё хорошо")
+	e.press(t, 2000, "rpt:ca:", ":0")
+	e.press(t, 2000, "rpt:ok:", "")
+
+	before := len(e.tg.methodsTo(testAdmin))
+	e.click(testAdmin, "adm:rv:1")
+	ms := e.tg.methodsTo(testAdmin)[before:]
+	if len(ms) != 2 || ms[0] != "sendMediaGroup" || ms[1] != "sendMessage" {
+		t.Fatalf("ожидали альбом, затем текст с кнопками; получили %v", ms)
+	}
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:rr:1:ok") {
+		t.Fatalf("кнопки должны быть в последнем сообщении: %+v", m)
+	}
+}
+
+// Один и тот же сценарий можно назначать одному покупателю повторно.
+func TestAssignSameScenarioTwice(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	if got := e.tg.last(); !strings.Contains(got, "Отправлено: 1") {
+		t.Fatalf("первое назначение: %q", got)
+	}
+	e.assignTo(2000, 1) // первое ещё не принято
+	got := e.tg.last()
+	if !strings.Contains(got, "Отправлено: 1") || !strings.Contains(got, "выдано ещё одно") {
+		t.Fatalf("повторное назначение должно пройти с пометкой: %q", got)
+	}
+	// У покупателя два задания; в списке их легко различить по номерам.
+	e.click(2000, "tsk:l")
+	m, _ := e.tg.lastTo(2000)
+	if !strings.Contains(m.Markup, "#1 ") || !strings.Contains(m.Markup, "#2 ") {
+		t.Fatalf("список заданий покупателя: %s", m.Markup)
 	}
 }

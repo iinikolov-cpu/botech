@@ -1,6 +1,7 @@
 package service
 
 import (
+	"botech/internal/storage"
 	"context"
 	"errors"
 	"strings"
@@ -273,5 +274,205 @@ func (e *env) reportOK(t *testing.T, user, taskID int64) {
 		Answers: []domain.Answer{{Key: "q_one", Value: "ответ"}},
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func goodInput(amount int64, receipt string) SubmitInput {
+	return SubmitInput{
+		Answers: goodAnswers(),
+		Comp:    &CompInput{Amount: amount, ReceiptFileID: receipt, ReceiptUniqueID: receipt + "-u"},
+	}
+}
+
+// Возврат отчёта на доработку: комментарий, новая версия, компенсация заменяется, использование промокода не дублируется.
+func TestReworkCycle(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.addCodes(t, 2)
+	sc := e.importScenario(t, reportScenario).Scenario
+	r := e.reports()
+	id := e.acceptedTask(t, sc.ID, 1)
+
+	// Нельзя вернуть на доработку то, что ещё не отправлено.
+	if _, changed, err := r.ReturnForRework(ctx, firstAdmin, id, "что-то"); err != nil || changed {
+		t.Fatalf("возврат до отчёта: changed=%v err=%v", changed, err)
+	}
+	if _, err := r.Submit(ctx, 1, id, goodInput(1000, "R1")); err != nil {
+		t.Fatal(err)
+	}
+	usedAfterFirst := e.stats(t)
+
+	// Пустой комментарий не принимается, статус не меняется.
+	if _, _, err := r.ReturnForRework(ctx, firstAdmin, id, "   "); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("пустой комментарий: %v", err)
+	}
+	card, changed, err := r.ReturnForRework(ctx, firstAdmin, id, "  Фото чека не читается  ")
+	if err != nil || !changed || card.Task.Status != domain.TaskRework {
+		t.Fatalf("возврат: changed=%v err=%v card=%+v", changed, err, card)
+	}
+	if card.Report == nil || card.Report.Decision != domain.ReportRework || card.Report.AdminComment != "Фото чека не читается" {
+		t.Fatalf("комментарий админа: %+v", card.Report)
+	}
+	if _, changed, _ := r.ReturnForRework(ctx, firstAdmin, id, "ещё раз"); changed {
+		t.Fatal("повторный возврат не должен срабатывать")
+	}
+	if ok, _ := e.tasks.Review(ctx, firstAdmin, id); ok {
+		t.Fatal("отчёт на доработке нельзя отметить проверенным")
+	}
+
+	// Покупатель исправляет. Срок давно прошёл, но исправление не считается опозданием.
+	if _, err := e.store.DB().ExecContext(ctx, `UPDATE tasks SET due_at = 1 WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CanReport(ctx, 1, id); err != nil {
+		t.Fatalf("CanReport на доработке: %v", err)
+	}
+	fixed := goodInput(2500, "R2")
+	fixed.Answers[0].Value = "4"
+	res, err := r.Submit(ctx, 1, id, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Late || res.Card.Task.Status != domain.TaskReported {
+		t.Fatalf("после исправления: late=%v статус=%s", res.Late, res.Card.Task.Status)
+	}
+	if res.Report.Revision != 2 || res.Card.Report.Answers[0].Value != "4" || res.Card.Report.Decision != domain.ReportPending {
+		t.Fatalf("версия отчёта: %+v", res.Report)
+	}
+	if res.Card.Comp.Amount != 2500 || res.Card.Comp.ReceiptFileID != "R2" || res.Card.Comp.Status != domain.CompPending {
+		t.Fatalf("компенсация должна обновиться: %+v", res.Card.Comp)
+	}
+	if st := e.stats(t); st != usedAfterFirst {
+		t.Fatalf("повторная отправка не должна менять учёт промокодов: было %+v, стало %+v", usedAfterFirst, st)
+	}
+	var versions int
+	_ = e.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM reports WHERE task_id = ?`, id).Scan(&versions)
+	if versions != 2 {
+		t.Fatalf("версий отчёта в истории %d, ожидали 2", versions)
+	}
+
+	// Теперь отчёт принимается, решение фиксируется.
+	if ok, err := e.tasks.Review(ctx, firstAdmin, id); err != nil || !ok {
+		t.Fatalf("проверка: ok=%v err=%v", ok, err)
+	}
+	card, _ = e.tasks.Card(ctx, id)
+	if card.Report.Decision != domain.ReportAccepted {
+		t.Fatalf("решение: %q", card.Report.Decision)
+	}
+	// История содержит комментарий админа.
+	events, _ := e.tasks.Events(ctx, id)
+	found := false
+	for _, ev := range events {
+		found = found || (ev.ToStatus == domain.TaskRework && strings.Contains(ev.Details, "Фото чека не читается"))
+	}
+	if !found {
+		t.Fatal("комментарий возврата должен быть в истории задания")
+	}
+}
+
+// Отклонение компенсации: комментарий, исправление покупателем, выплата только после исправления.
+func TestRejectAndResubmitCompensation(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	sc := e.importScenario(t, reportScenario).Scenario
+	r := e.reports()
+	id := e.acceptedTask(t, sc.ID, 1)
+	res, err := r.Submit(ctx, 1, id, goodInput(9000, "R1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := res.Card.Comp.ID
+
+	if _, _, err := r.RejectCompensation(ctx, firstAdmin, cid, ""); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("пустой комментарий: %v", err)
+	}
+	cc, changed, err := r.RejectCompensation(ctx, firstAdmin, cid, "Сумма не совпадает с чеком")
+	if err != nil || !changed || cc.Comp.Status != domain.CompRejected || cc.Comp.AdminComment != "Сумма не совпадает с чеком" {
+		t.Fatalf("отклонение: changed=%v err=%v %+v", changed, err, cc)
+	}
+	if ok, _ := r.MarkPaid(ctx, firstAdmin, cid); ok {
+		t.Fatal("отклонённую компенсацию выплатить нельзя")
+	}
+	if _, changed, _ := r.RejectCompensation(ctx, firstAdmin, cid, "повтор"); changed {
+		t.Fatal("повторное отклонение не должно срабатывать")
+	}
+	if _, total, _, _ := r.CompPage(ctx, domain.CompRejected, 10, 0); total != 1 {
+		t.Fatalf("в списке отклонённых %d, ожидали 1", total)
+	}
+
+	// Исправление покупателем.
+	if _, err := r.ResubmitCompensation(ctx, 2, id, CompInput{Amount: 100, ReceiptFileID: "X"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("чужой покупатель: %v", err)
+	}
+	if _, err := r.ResubmitCompensation(ctx, 1, id, CompInput{Amount: 0, ReceiptFileID: "X"}); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("неверная сумма: %v", err)
+	}
+	if _, err := r.ResubmitCompensation(ctx, 1, id, CompInput{Amount: 8500, ReceiptFileID: "R2", ReceiptUniqueID: "R2-u"}); err != nil {
+		t.Fatal(err)
+	}
+	cc, _ = r.CompCardByID(ctx, cid)
+	if cc.Comp.Status != domain.CompPending || cc.Comp.Amount != 8500 || cc.Comp.AdminComment != "" {
+		t.Fatalf("после исправления: %+v", cc.Comp)
+	}
+	// Исправлять можно только отклонённую.
+	if _, err := r.ResubmitCompensation(ctx, 1, id, CompInput{Amount: 1, ReceiptFileID: "X"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("исправление не отклонённой: %v", err)
+	}
+	if ok, err := r.MarkPaid(ctx, firstAdmin, cid); err != nil || !ok {
+		t.Fatalf("выплата после исправления: ok=%v err=%v", ok, err)
+	}
+	if _, changed, _ := r.RejectCompensation(ctx, firstAdmin, cid, "поздно"); changed {
+		t.Fatal("выплаченную компенсацию отклонить нельзя")
+	}
+}
+
+// Раздел «Отчёты»: принятый, но не выплаченный отчёт остаётся в списке, пока компенсация не закрыта.
+func TestReviewedStaysUntilCompensationClosed(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	sc := e.importScenario(t, reportScenario).Scenario
+	r := e.reports()
+	id := e.acceptedTask(t, sc.ID, 1)
+	res, err := r.Submit(ctx, 1, id, goodInput(700, "R1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports := storage.TaskFilter{Statuses: []domain.TaskStatus{domain.TaskReported, domain.TaskRework}, ReviewedMode: storage.ReviewedOpenComp}
+	closed := storage.TaskFilter{Statuses: []domain.TaskStatus{domain.TaskDeclined, domain.TaskCancelled}, ReviewedMode: storage.ReviewedSettled}
+	count := func(f storage.TaskFilter) int {
+		_, n, err := e.tasks.Page(ctx, f, 10, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if count(reports) != 1 || count(closed) != 0 {
+		t.Fatalf("отчёт ждёт проверки: отчёты=%d закрыто=%d", count(reports), count(closed))
+	}
+	if ok, _ := e.tasks.Review(ctx, firstAdmin, id); !ok {
+		t.Fatal("проверка")
+	}
+	if count(reports) != 1 || count(closed) != 0 {
+		t.Fatalf("принят, но не выплачен, должен оставаться в «Отчётах»: отчёты=%d закрыто=%d", count(reports), count(closed))
+	}
+	if _, _, err := r.RejectCompensation(ctx, firstAdmin, res.Card.Comp.ID, "неверный чек"); err != nil {
+		t.Fatal(err)
+	}
+	if count(reports) != 1 {
+		t.Fatal("с отклонённой компенсацией задание остаётся в «Отчётах»")
+	}
+	if _, err := r.ResubmitCompensation(ctx, 1, id, CompInput{Amount: 700, ReceiptFileID: "R3", ReceiptUniqueID: "R3-u"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := r.MarkPaid(ctx, firstAdmin, res.Card.Comp.ID); !ok {
+		t.Fatal("выплата")
+	}
+	if count(reports) != 0 || count(closed) != 1 {
+		t.Fatalf("после выплаты задание закрыто: отчёты=%d закрыто=%d", count(reports), count(closed))
+	}
+	// Покупатель видит проверенное задание, пока компенсация открыта (и не видит после выплаты).
+	if list, _ := e.tasks.ForUser(ctx, 1); len(list) != 0 {
+		t.Fatalf("после выплаты в списке покупателя пусто, а там %d", len(list))
 	}
 }

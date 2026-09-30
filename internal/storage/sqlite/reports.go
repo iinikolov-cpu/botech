@@ -20,9 +20,12 @@ func b2i(b bool) int {
 }
 
 func (r *reportRepo) Create(ctx context.Context, rep *domain.Report) error {
+	// Номер версии считается тем же запросом, что и вставка (записи сериализуются БД).
 	err := r.q.QueryRowContext(ctx,
-		`INSERT INTO reports (task_id, user_id, late, submitted_at) VALUES (?,?,?,?) RETURNING id`,
-		rep.TaskID, rep.UserID, b2i(rep.Late), rep.SubmittedAt.Unix()).Scan(&rep.ID)
+		`INSERT INTO reports (task_id, user_id, revision, late, submitted_at)
+		 SELECT ?, ?, COALESCE(MAX(revision), 0) + 1, ?, ? FROM reports WHERE task_id = ?
+		 RETURNING id, revision`,
+		rep.TaskID, rep.UserID, b2i(rep.Late), rep.SubmittedAt.Unix(), rep.TaskID).Scan(&rep.ID, &rep.Revision)
 	if isUnique(err) {
 		return storage.ErrDuplicate
 	}
@@ -42,18 +45,20 @@ func (r *reportRepo) Create(ctx context.Context, rep *domain.Report) error {
 
 func (r *reportRepo) ByTask(ctx context.Context, taskID int64) (*domain.Report, error) {
 	var (
-		rep       domain.Report
-		late, sub int64
+		rep                domain.Report
+		late, sub, decided int64
 	)
-	err := r.q.QueryRowContext(ctx, `SELECT id, task_id, user_id, late, submitted_at FROM reports WHERE task_id = ?`, taskID).
-		Scan(&rep.ID, &rep.TaskID, &rep.UserID, &late, &sub)
+	err := r.q.QueryRowContext(ctx,
+		`SELECT id, task_id, user_id, revision, late, submitted_at, decision, admin_comment, decided_at
+		   FROM reports WHERE task_id = ? ORDER BY revision DESC LIMIT 1`, taskID).
+		Scan(&rep.ID, &rep.TaskID, &rep.UserID, &rep.Revision, &late, &sub, &rep.Decision, &rep.AdminComment, &decided)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, storage.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	rep.Late, rep.SubmittedAt = late != 0, time.Unix(sub, 0).UTC()
+	rep.Late, rep.SubmittedAt, rep.DecidedAt = late != 0, time.Unix(sub, 0).UTC(), ts(decided)
 
 	rows, err := r.q.QueryContext(ctx,
 		`SELECT question_key, type, value, file_id, file_unique_id, skipped FROM report_answers WHERE report_id = ? ORDER BY id`, rep.ID)
@@ -76,9 +81,17 @@ func (r *reportRepo) ByTask(ctx context.Context, taskID int64) (*domain.Report, 
 	return &rep, rows.Err()
 }
 
+func (r *reportRepo) SetDecision(ctx context.Context, taskID int64, decision, comment string, by int64, at time.Time) error {
+	_, err := r.q.ExecContext(ctx,
+		`UPDATE reports SET decision = ?, admin_comment = ?, decided_by = ?, decided_at = ?
+		  WHERE task_id = ? AND revision = (SELECT MAX(revision) FROM reports WHERE task_id = ?)`,
+		decision, comment, by, at.Unix(), taskID, taskID)
+	return err
+}
+
 type compRepo struct{ q dbtx }
 
-const compCols = `id, task_id, user_id, amount, receipt_file_id, receipt_unique_id, status, created_at, paid_at, paid_by`
+const compCols = `id, task_id, user_id, amount, receipt_file_id, receipt_unique_id, status, admin_comment, created_at, paid_at, paid_by`
 
 func scanComp(sc interface{ Scan(...any) error }) (*domain.Compensation, error) {
 	var (
@@ -86,7 +99,7 @@ func scanComp(sc interface{ Scan(...any) error }) (*domain.Compensation, error) 
 		st         string
 		cr, paidAt int64
 	)
-	if err := sc.Scan(&c.ID, &c.TaskID, &c.UserID, &c.Amount, &c.ReceiptFileID, &c.ReceiptUniqueID, &st, &cr, &paidAt, &c.PaidBy); err != nil {
+	if err := sc.Scan(&c.ID, &c.TaskID, &c.UserID, &c.Amount, &c.ReceiptFileID, &c.ReceiptUniqueID, &st, &c.AdminComment, &cr, &paidAt, &c.PaidBy); err != nil {
 		return nil, err
 	}
 	c.Status, c.CreatedAt, c.PaidAt = domain.CompStatus(st), ts(cr), ts(paidAt)
@@ -171,4 +184,25 @@ func (r *compRepo) FindByReceipt(ctx context.Context, uniqueID string, exceptTas
 		return 0, false, nil
 	}
 	return id, err == nil, err
+}
+
+func (r *compRepo) Reject(ctx context.Context, id int64, comment string) (bool, error) {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE compensations SET status = 'rejected', admin_comment = ? WHERE id = ? AND status = 'pending'`, comment, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (r *compRepo) UpdateData(ctx context.Context, taskID, amount int64, fileID, uniqueID string) (bool, error) {
+	res, err := r.q.ExecContext(ctx,
+		`UPDATE compensations SET amount = ?, receipt_file_id = ?, receipt_unique_id = ?, status = 'pending', admin_comment = ''
+		  WHERE task_id = ? AND status IN ('pending', 'rejected')`, amount, fileID, uniqueID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }

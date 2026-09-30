@@ -48,6 +48,7 @@ type TaskCard struct {
 	User     *domain.User
 	Promo    *domain.PromoAssignment // выдача промокода (nil, если не выдавали)
 	Comp     *domain.Compensation    // данные компенсации (nil, если нет)
+	Report   *domain.Report          // последняя версия отчёта (nil, если отчёта нет)
 
 	// PromoReason заполняется результатом Accept и IssuePromo, когда кода нет.
 	PromoReason PromoReason
@@ -56,9 +57,12 @@ type TaskCard struct {
 // AssignResult итог назначения нескольким покупателям.
 type AssignResult struct {
 	Created []*domain.Task
-	Skipped []int64 // у этих покупателей уже есть незавершённое задание по сценарию
+	Repeat  []int64 // у этих покупателей уже было незавершённое задание по этому сценарию (выдано ещё одно)
 	Invalid []int64 // нет такого активного покупателя
 }
+
+// activeStatuses незавершённые задания.
+var activeStatuses = []domain.TaskStatus{domain.TaskCreated, domain.TaskSent, domain.TaskAccepted, domain.TaskExpired, domain.TaskRework}
 
 // Assign создаёт задания (статус «создано»). Отправку в Telegram выполняет вызывающий,
 // затем вызывает MarkSent. Так сбой доставки не теряет задание.
@@ -86,8 +90,11 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 			continue
 		}
 		seen[uid] = true
-		// Каждому покупателю своя транзакция: дубль у одного не отменяет остальных.
-		var task *domain.Task
+		// Каждому покупателю своя транзакция: сбой у одного не отменяет остальных.
+		var (
+			task   *domain.Task
+			repeat bool
+		)
 		err := s.store.WithTx(ctx, func(r storage.Repos) error {
 			u, err := r.Users.Get(ctx, uid)
 			if errors.Is(err, storage.ErrNotFound) || (err == nil && (u.Role != domain.RoleBuyer || u.Status != domain.StatusActive)) {
@@ -96,6 +103,12 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 			if err != nil {
 				return err
 			}
+			// Повторное назначение того же сценария разрешено, но админу сообщаем о нём.
+			n, err := r.Tasks.Count(ctx, storage.TaskFilter{UserID: uid, ScenarioID: scenarioID, Statuses: activeStatuses})
+			if err != nil {
+				return err
+			}
+			repeat = n > 0
 			now := s.now().UTC()
 			task = &domain.Task{
 				ScenarioID: scenarioID, ScenarioVersionID: ver.ID, UserID: uid,
@@ -118,8 +131,9 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 		switch {
 		case err == nil:
 			res.Created = append(res.Created, task)
-		case errors.Is(err, storage.ErrDuplicate):
-			res.Skipped = append(res.Skipped, uid)
+			if repeat {
+				res.Repeat = append(res.Repeat, uid)
+			}
 		case errors.Is(err, ErrNotFound):
 			res.Invalid = append(res.Invalid, uid)
 		default:
@@ -238,7 +252,10 @@ func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard
 
 // Review админ помечает задание «проверено».
 func (s *Tasks) Review(ctx context.Context, admin, taskID int64) (bool, error) {
-	changed, err := s.transition(ctx, taskID, 0, domain.TaskReviewed, "", nil)
+	accept := func(r storage.Repos, t *domain.Task, now time.Time) error {
+		return r.Reports.SetDecision(ctx, t.ID, domain.ReportAccepted, "", admin, now)
+	}
+	changed, err := s.transition(ctx, taskID, 0, domain.TaskReviewed, "", accept)
 	if err != nil || !changed {
 		return changed, err
 	}
@@ -370,6 +387,9 @@ func (s *Tasks) card(ctx context.Context, r storage.Repos, t *domain.Task) (*Tas
 	if c.Comp, err = r.Comps.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return nil, err
 	}
+	if c.Report, err = r.Reports.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -379,12 +399,13 @@ func (s *Tasks) Events(ctx context.Context, id int64) ([]*domain.TaskEvent, erro
 }
 
 // BuyerStatuses статусы, которые покупатель видит в своём списке.
-var BuyerStatuses = []domain.TaskStatus{domain.TaskSent, domain.TaskAccepted, domain.TaskExpired, domain.TaskReported}
+var BuyerStatuses = []domain.TaskStatus{domain.TaskSent, domain.TaskAccepted, domain.TaskExpired, domain.TaskReported, domain.TaskRework}
 
 // ForUser задания покупателя (новые сверху).
 func (s *Tasks) ForUser(ctx context.Context, userID int64) ([]*TaskCard, error) {
 	r := s.store.Repos()
-	list, err := r.Tasks.List(ctx, storage.TaskFilter{UserID: userID, Statuses: BuyerStatuses}, 20, 0)
+	// Проверенные задания показываем, пока компенсация не закрыта: по ней может понадобиться действие покупателя.
+	list, err := r.Tasks.List(ctx, storage.TaskFilter{UserID: userID, Statuses: BuyerStatuses, ReviewedMode: storage.ReviewedOpenComp}, 20, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -392,9 +413,8 @@ func (s *Tasks) ForUser(ctx context.Context, userID int64) ([]*TaskCard, error) 
 }
 
 // Page страница заданий для админа с общим числом.
-func (s *Tasks) Page(ctx context.Context, statuses []domain.TaskStatus, limit, offset int) ([]*TaskCard, int, error) {
+func (s *Tasks) Page(ctx context.Context, f storage.TaskFilter, limit, offset int) ([]*TaskCard, int, error) {
 	r := s.store.Repos()
-	f := storage.TaskFilter{Statuses: statuses}
 	list, err := r.Tasks.List(ctx, f, limit, offset)
 	if err != nil {
 		return nil, 0, err

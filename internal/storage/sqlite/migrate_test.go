@@ -63,13 +63,29 @@ func TestMigrationKeepsData(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO task_events (task_id, kind, at) VALUES (999,'x',1)`); err == nil {
 		t.Fatal("внешние ключи должны быть включены после миграции")
 	}
-	// Антидубль активных заданий пересоздан.
+	// Повторное назначение того же сценария тому же покупателю разрешено (миграция 0006).
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET status='sent' WHERE id=7`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO tasks (scenario_id, scenario_version_id, user_id, status, due_days, created_by, created_at) VALUES (1,1,1,'created',3,1,1)`); err == nil {
-		t.Fatal("уникальный индекс активных заданий должен работать после миграции")
+		`INSERT INTO tasks (scenario_id, scenario_version_id, user_id, status, due_days, created_by, created_at) VALUES (1,1,1,'created',3,1,1)`); err != nil {
+		t.Fatalf("повторное назначение должно быть разрешено: %v", err)
+	}
+	// Новый статус и версии отчёта: отчёт из старой схемы получил версию 1.
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET status='rework' WHERE id=7`); err != nil {
+		t.Fatalf("статус rework должен быть разрешён: %v", err)
+	}
+	var rev int
+	if err := db.QueryRowContext(ctx, `SELECT revision FROM reports WHERE task_id = 7`).Scan(&rev); err != nil || rev != 1 {
+		t.Fatalf("версия старого отчёта: %d %v", rev, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE compensations SET status='rejected' WHERE task_id = 7`); err != nil {
+		t.Fatalf("статус rejected должен быть разрешён: %v", err)
+	}
+	// Номера заданий продолжаются после максимального (8 = следующий за вставленным в тесте).
+	var next int64
+	if err := db.QueryRowContext(ctx, `SELECT MAX(id) FROM tasks`).Scan(&next); err != nil || next < 8 {
+		t.Fatalf("нумерация: %d %v", next, err)
 	}
 }
 

@@ -107,7 +107,7 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
 	case "pr", "pra", "prc", "prl", "prd", "prda", "prdy", "prdl":
 		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
-	case "cp", "cc", "cpd", "cpy", "rv":
+	case "cp", "cc", "cv", "cpd", "cpy", "crj", "crx", "rv", "rr", "rw", "rwx":
 		text, markup, toast = a.compCallback(ctx, b, admin, parts)
 	default:
 		a.answerCB(ctx, b, cb.ID, "Неизвестное действие", false)

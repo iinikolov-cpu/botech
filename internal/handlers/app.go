@@ -89,6 +89,16 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 			a.importPromos(ctx, b, u, m.Text)
 			return
 		}
+	case reworkDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.onReworkComment(ctx, b, u, m.Text)
+			return
+		}
+	case compRejectDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.onCompRejectComment(ctx, b, u, m.Text)
+			return
+		}
 	case promoDelDialog:
 		if u.IsAdmin() && m.Text != "" {
 			a.deletePromos(ctx, b, u, m.Text)

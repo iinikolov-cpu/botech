@@ -90,14 +90,25 @@ func (a *App) edit(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, te
 		a.send(ctx, b, cb.From.ID, text, markup)
 		return
 	}
-	p := &bot.EditMessageTextParams{
-		ChatID: msg.Chat.ID, MessageID: msg.ID, Text: text, ParseMode: models.ParseModeHTML,
-		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
+	var err error
+	if msg.Photo != nil || msg.Video != nil || msg.Document != nil {
+		// У сообщений с медиа меняется подпись, а не текст.
+		p := &bot.EditMessageCaptionParams{ChatID: msg.Chat.ID, MessageID: msg.ID, Caption: cut(text, 1000), ParseMode: models.ParseModeHTML}
+		if markup != nil {
+			p.ReplyMarkup = markup
+		}
+		_, err = b.EditMessageCaption(ctx, p)
+	} else {
+		p := &bot.EditMessageTextParams{
+			ChatID: msg.Chat.ID, MessageID: msg.ID, Text: text, ParseMode: models.ParseModeHTML,
+			LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
+		}
+		if markup != nil {
+			p.ReplyMarkup = markup
+		}
+		_, err = b.EditMessageText(ctx, p)
 	}
-	if markup != nil {
-		p.ReplyMarkup = markup
-	}
-	if _, err := b.EditMessageText(ctx, p); err != nil && !strings.Contains(err.Error(), "not modified") {
+	if err != nil && !strings.Contains(err.Error(), "not modified") {
 		a.log.Warn("не удалось изменить сообщение", "user", maskID(cb.From.ID), "err", err)
 	}
 }
@@ -152,4 +163,53 @@ func (l *limiter) Blocked(key int64) bool {
 		}
 	}
 	return c >= l.n
+}
+
+// mediaItem фото или видео из отчёта для показа админу.
+type mediaItem struct {
+	Video   bool
+	FileID  string
+	Caption string
+}
+
+// sendMedia отправляет фото и видео компактно: альбомами по 10 штук (одиночный файл обычным
+// сообщением). Вызывать нужно ДО сообщения с кнопками, чтобы кнопки оказались в самом низу.
+func (a *App) sendMedia(ctx context.Context, b *bot.Bot, chatID int64, items []mediaItem) {
+	single := func(m mediaItem) {
+		var err error
+		if m.Video {
+			_, err = b.SendVideo(ctx, &bot.SendVideoParams{ChatID: chatID, Video: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
+		} else {
+			_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{ChatID: chatID, Photo: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
+		}
+		if err != nil {
+			a.log.Warn("не удалось отправить медиа", "err", err)
+		}
+	}
+	for len(items) > 0 {
+		n := len(items)
+		if n > 10 {
+			n = 10
+		}
+		chunk := items[:n]
+		items = items[n:]
+		if len(chunk) == 1 {
+			single(chunk[0])
+			continue
+		}
+		group := make([]models.InputMedia, 0, len(chunk))
+		for _, m := range chunk {
+			if m.Video {
+				group = append(group, &models.InputMediaVideo{Media: m.FileID, Caption: m.Caption})
+			} else {
+				group = append(group, &models.InputMediaPhoto{Media: m.FileID, Caption: m.Caption})
+			}
+		}
+		if _, err := b.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: group}); err != nil {
+			a.log.Warn("альбом не отправился, отправляю по одному", "err", err)
+			for _, m := range chunk {
+				single(m)
+			}
+		}
+	}
 }

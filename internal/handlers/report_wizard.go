@@ -37,6 +37,7 @@ type reportState struct {
 	Answers []domain.Answer `json:"answers"`
 
 	WantComp        bool   `json:"want_comp"`
+	CompOnly        bool   `json:"comp_only"` // исправление только данных компенсации, без отчёта
 	Amount          int64  `json:"amount"`
 	ReceiptFileID   string `json:"receipt_file_id"`
 	ReceiptUniqueID string `json:"receipt_unique_id"`
@@ -75,11 +76,38 @@ func (a *App) startReport(ctx context.Context, b *bot.Bot, u *domain.User, cb *m
 	}
 	a.answerCB(ctx, b, cb.ID, "", false)
 	st, ok := a.loadReport(ctx, u.TgID)
-	if !ok || st.TaskID != taskID {
+	if !ok || st.TaskID != taskID || st.CompOnly {
 		st = &reportState{TaskID: taskID, Phase: phaseQuestion}
+		// После возврата на доработку сначала напоминаем, что просил исправить админ.
+		if card, err := a.tasks.Card(ctx, taskID); err == nil && card.Task.Status == domain.TaskRework && card.Report != nil && card.Report.AdminComment != "" {
+			a.send(ctx, b, u.TgID, i18n.T(l, "rpt_rework_intro", esc(card.Report.AdminComment)), nil)
+		}
 	}
 	st.Step++
 	a.saveReport(ctx, u.TgID, st)
+	a.ask(ctx, b, u, st)
+}
+
+// startCompFix запускает короткий диалог: только сумма и чек для отклонённой компенсации.
+func (a *App) startCompFix(ctx context.Context, b *bot.Bot, u *domain.User, cb *models.CallbackQuery, taskID int64) {
+	l := lang(u)
+	card, err := a.tasks.Card(ctx, taskID)
+	if err != nil || card.Task.UserID != u.TgID || card.Comp == nil {
+		a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_not_found"), true)
+		return
+	}
+	if card.Comp.Status != domain.CompRejected {
+		a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_already"), true)
+		return
+	}
+	a.answerCB(ctx, b, cb.ID, "", false)
+	st, ok := a.loadReport(ctx, u.TgID)
+	if !ok || st.TaskID != taskID || !st.CompOnly {
+		st = &reportState{TaskID: taskID, CompOnly: true, WantComp: true, Phase: phaseCompAmount}
+	}
+	st.Step++
+	a.saveReport(ctx, u.TgID, st)
+	a.send(ctx, b, u.TgID, i18n.T(l, "comp_rejected", esc(card.Comp.AdminComment)), nil)
 	a.ask(ctx, b, u, st)
 }
 
@@ -140,10 +168,15 @@ func (a *App) ask(ctx context.Context, b *bot.Bot, u *domain.User, st *reportSta
 			row(btn(i18n.T(l, "btn_comp_yes"), cb("ca", "1")), btn(i18n.T(l, "btn_comp_no"), cb("ca", "0"))),
 			nav(true, false)))
 	case phaseCompAmount:
-		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_amount_ask"), kb(nav(true, false)))
+		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_amount_ask"), kb(nav(!st.CompOnly, false)))
 	case phaseCompReceipt:
 		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_receipt_ask"), kb(nav(true, false)))
 	case phaseConfirm:
+		if st.CompOnly {
+			a.send(ctx, b, u.TgID, i18n.T(l, "comp_fix_confirm", fmtMoney(st.Amount)), kb(
+				row(btn(i18n.T(l, "btn_send_fix"), cb("ok"))), nav(true, false)))
+			break
+		}
 		a.send(ctx, b, u.TgID, a.reportSummary(l, qs, st), kb(
 			row(btn(i18n.T(l, "btn_send_report"), cb("ok"))), nav(true, false)))
 	}
@@ -226,7 +259,9 @@ func (st *reportState) back(total int) {
 	case phaseCompAsk:
 		st.Phase, st.Idx = phaseQuestion, total-1
 	case phaseCompAmount:
-		st.Phase = phaseCompAsk
+		if !st.CompOnly { // при исправлении компенсации шага «назад» нет
+			st.Phase = phaseCompAsk
+		}
 	case phaseCompReceipt:
 		st.Phase = phaseCompAmount
 	case phaseConfirm:
@@ -405,6 +440,10 @@ func (a *App) onReportMessage(ctx context.Context, b *bot.Bot, u *domain.User, s
 // submitReport отправляет готовый отчёт и уведомляет админа.
 func (a *App) submitReport(ctx context.Context, b *bot.Bot, u *domain.User, st *reportState) {
 	l := lang(u)
+	if st.CompOnly {
+		a.submitCompFix(ctx, b, u, st)
+		return
+	}
 	in := service.SubmitInput{Answers: st.Answers}
 	if st.WantComp {
 		in.Comp = &service.CompInput{Amount: st.Amount, ReceiptFileID: st.ReceiptFileID, ReceiptUniqueID: st.ReceiptUniqueID}
@@ -497,4 +536,34 @@ func fmtMoney(v int64) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+// submitCompFix отправляет исправленные данные компенсации и уведомляет админов.
+func (a *App) submitCompFix(ctx context.Context, b *bot.Bot, u *domain.User, st *reportState) {
+	l := lang(u)
+	dup, err := a.reports.ResubmitCompensation(ctx, u.TgID, st.TaskID, service.CompInput{
+		Amount: st.Amount, ReceiptFileID: st.ReceiptFileID, ReceiptUniqueID: st.ReceiptUniqueID,
+	})
+	if err != nil {
+		if errors.Is(err, service.ErrForbidden) || errors.Is(err, service.ErrNotFound) {
+			_ = a.dialog.Clear(ctx, u.TgID) // исправлять уже нечего
+		} else if !errors.Is(err, service.ErrInvalidReport) {
+			a.log.Error("исправление компенсации", "err", err)
+		}
+		a.send(ctx, b, u.TgID, i18n.T(l, "comp_fix_error", esc(errText(err))), nil)
+		return
+	}
+	_ = a.dialog.Clear(ctx, u.TgID)
+	a.send(ctx, b, u.TgID, i18n.T(l, "comp_fix_sent"), kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
+	a.log.Info("компенсация исправлена", "user", maskID(u.TgID), "task", st.TaskID)
+
+	card, err := a.tasks.Card(ctx, st.TaskID)
+	if err != nil || card.Comp == nil {
+		return
+	}
+	msg := fmt.Sprintf("💰 %s исправил данные компенсации по заданию #%d: %s сум.", userLabel(u), st.TaskID, fmtMoney(card.Comp.Amount))
+	if dup != 0 {
+		msg += fmt.Sprintf("\n⚠ Этот файл чека уже прикладывали в задании #%d. Проверьте.", dup)
+	}
+	a.notifyAdmins(ctx, b, msg, kb(row(btn("💰 Открыть", "adm:cc:"+itoa(card.Comp.ID)))))
 }

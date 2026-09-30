@@ -58,15 +58,25 @@ type ScenarioRepo interface {
 	LatestVersion(ctx context.Context, scenarioID int64) (*domain.ScenarioVersion, error)
 }
 
+// Как учитывать задания в статусе «проверено» в выборке (по состоянию компенсации).
+const (
+	ReviewedNone     = 0 // не включать
+	ReviewedOpenComp = 1 // включать, если компенсация ещё не закрыта (к выплате или отклонена)
+	ReviewedSettled  = 2 // включать, если компенсации нет или она выплачена
+)
+
 // TaskFilter условия выборки заданий (нулевые значения = без фильтра).
+// Statuses и ReviewedMode объединяются через ИЛИ; если заданы оба пустыми, фильтра по статусу нет.
 type TaskFilter struct {
-	UserID   int64
-	Statuses []domain.TaskStatus
+	UserID       int64
+	ScenarioID   int64
+	Statuses     []domain.TaskStatus
+	ReviewedMode int
 }
 
 // TaskRepo задания и их история.
 type TaskRepo interface {
-	Create(ctx context.Context, t *domain.Task) error // заполняет ID; ErrDuplicate, если уже есть активное
+	Create(ctx context.Context, t *domain.Task) error // заполняет ID
 	Get(ctx context.Context, id int64) (*domain.Task, error)
 	List(ctx context.Context, f TaskFilter, limit, offset int) ([]*domain.Task, error)
 	Count(ctx context.Context, f TaskFilter) (int, error)
@@ -118,8 +128,12 @@ type PromoRepo interface {
 
 // ReportRepo отчёты и ответы.
 type ReportRepo interface {
-	Create(ctx context.Context, r *domain.Report) error // ErrDuplicate, если отчёт по заданию уже есть
+	// Create сохраняет новую версию отчёта (заполняет ID и Revision: 1 для первого, далее по порядку).
+	Create(ctx context.Context, r *domain.Report) error
+	// ByTask последняя версия отчёта по заданию (ErrNotFound, если отчётов нет).
 	ByTask(ctx context.Context, taskID int64) (*domain.Report, error)
+	// SetDecision записывает решение админа и комментарий в последнюю версию отчёта.
+	SetDecision(ctx context.Context, taskID int64, decision, comment string, by int64, at time.Time) error
 }
 
 // CompRepo компенсации.
@@ -131,6 +145,10 @@ type CompRepo interface {
 	SumByStatus(ctx context.Context, status domain.CompStatus) (int64, error)
 	// MarkPaid ставит «выплачено», только если статус ещё pending.
 	MarkPaid(ctx context.Context, id, by int64, at time.Time) (bool, error)
+	// Reject отклоняет компенсацию (только из pending) с комментарием для покупателя.
+	Reject(ctx context.Context, id int64, comment string) (bool, error)
+	// UpdateData заменяет сумму и чек у компенсации, которую ещё не выплатили, и возвращает её в pending.
+	UpdateData(ctx context.Context, taskID, amount int64, fileID, uniqueID string) (bool, error)
 	// FindByReceipt ищет другое задание с тем же файлом чека (защита от повторного использования).
 	FindByReceipt(ctx context.Context, uniqueID string, exceptTaskID int64) (int64, bool, error)
 }

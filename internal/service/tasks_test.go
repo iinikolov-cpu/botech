@@ -160,10 +160,10 @@ func TestAssign(t *testing.T) {
 		t.Errorf("недопустимых %v, ожидали 3", res.Invalid)
 	}
 
-	// Повторная выдача того же сценария тому же покупателю пропускается.
+	// Повторная выдача того же сценария тому же покупателю разрешена, админ получает пометку.
 	res2, err := e.tasks.Assign(ctx, firstAdmin, sc.ID, 5, []int64{1})
-	if err != nil || len(res2.Created) != 0 || len(res2.Skipped) != 1 {
-		t.Errorf("дубль: err=%v res=%+v", err, res2)
+	if err != nil || len(res2.Created) != 1 || len(res2.Repeat) != 1 || res2.Repeat[0] != 1 {
+		t.Errorf("повторное назначение: err=%v res=%+v", err, res2)
 	}
 
 	tests := []struct {
@@ -177,27 +177,37 @@ func TestAssign(t *testing.T) {
 	}
 }
 
-// Дубль при одновременном назначении: уникальный индекс в БД не даст создать два активных задания.
-func TestAssignConcurrentNoDuplicates(t *testing.T) {
+// Одновременные назначения не мешают друг другу: все задания создаются, номера уникальны.
+func TestAssignConcurrent(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	sc := e.importScenario(t, scenarioYAML).Scenario
 
-	var created atomic.Int32
+	ids := make(chan int64, 10)
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			res, err := e.tasks.Assign(ctx, firstAdmin, sc.ID, 3, []int64{1})
-			if err == nil {
-				created.Add(int32(len(res.Created)))
+			if err != nil || len(res.Created) != 1 {
+				t.Errorf("назначение: err=%v res=%+v", err, res)
+				return
 			}
+			ids <- res.Created[0].ID
 		}()
 	}
 	wg.Wait()
-	if created.Load() != 1 {
-		t.Fatalf("создано %d заданий, ожидали ровно 1", created.Load())
+	close(ids)
+	seen := map[int64]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Errorf("номер задания %d выдан дважды", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != 10 {
+		t.Fatalf("создано %d заданий, ожидали 10", len(seen))
 	}
 }
 

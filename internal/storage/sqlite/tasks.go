@@ -72,11 +72,26 @@ func filterSQL(f storage.TaskFilter) (string, []any) {
 		cond += " AND user_id = ?"
 		args = append(args, f.UserID)
 	}
+	if f.ScenarioID != 0 {
+		cond += " AND scenario_id = ?"
+		args = append(args, f.ScenarioID)
+	}
+	const openComp = `EXISTS (SELECT 1 FROM compensations c WHERE c.task_id = tasks.id AND c.status IN ('pending','rejected'))`
+	var parts []string
 	if len(f.Statuses) > 0 {
-		cond += " AND status IN (?" + strings.Repeat(",?", len(f.Statuses)-1) + ")"
+		parts = append(parts, "status IN (?"+strings.Repeat(",?", len(f.Statuses)-1)+")")
 		for _, s := range f.Statuses {
 			args = append(args, string(s))
 		}
+	}
+	switch f.ReviewedMode {
+	case storage.ReviewedOpenComp:
+		parts = append(parts, "(status = 'reviewed' AND "+openComp+")")
+	case storage.ReviewedSettled:
+		parts = append(parts, "(status = 'reviewed' AND NOT "+openComp+")")
+	}
+	if len(parts) > 0 {
+		cond += " AND (" + strings.Join(parts, " OR ") + ")"
 	}
 	return cond, args
 }
