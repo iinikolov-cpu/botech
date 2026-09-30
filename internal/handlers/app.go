@@ -36,20 +36,20 @@ func New(access *service.Access, log *slog.Logger, loc *time.Location) *App {
 	}
 }
 
-// Register регистрирует маршруты. Middleware доступа подключается отдельно (Middleware()).
+// Register регистрирует маршруты. Имена команд задаются БЕЗ слеша (так требует библиотека). Middleware доступа подключается отдельно (Middleware()).
 func (a *App) Register(b *bot.Bot, username string) {
 	a.botUsername = username
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeCommandStartOnly, a.onStart)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeCommand, a.onHelp)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/admin", bot.MatchTypeCommand, a.adminOnly(a.onAdmin))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/addadmin", bot.MatchTypeCommand, a.adminOnly(a.onAddAdmin))
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/rmadmin", bot.MatchTypeCommand, a.adminOnly(a.onRemoveAdmin))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "start", bot.MatchTypeCommandStartOnly, a.onStart)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, a.onHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "admin", bot.MatchTypeCommand, a.adminOnly(a.onAdmin))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "addadmin", bot.MatchTypeCommand, a.adminOnly(a.onAddAdmin))
+	b.RegisterHandler(bot.HandlerTypeMessageText, "rmadmin", bot.MatchTypeCommand, a.adminOnly(a.onRemoveAdmin))
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "adm:", bot.MatchTypePrefix, a.adminOnly(a.onAdminCallback))
 }
 
 // DefaultHandler обрабатывает всё, что не подошло под маршруты (свободный текст и т.п.).
 func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update) {
-	if u := userFrom(ctx); u != nil && upd.Message != nil {
+	if u := userFrom(ctx); u != nil && upd.Message != nil && upd.Message.Text != "" {
 		a.send(ctx, b, u.TgID, i18n.T(lang(u), "help_buyer"), nil)
 	}
 }
