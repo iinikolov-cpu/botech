@@ -51,7 +51,7 @@ func (e *env) addBuyers(t *testing.T, from, to int64) {
 	}
 }
 
-func (e *env) promos() *Promos { return NewPromos(e.store) }
+func (e *env) promos() *Promos { return NewPromos(e.store, e.tasks.PromoMaxUses()) }
 
 func (e *env) addCodes(t *testing.T, n int) {
 	t.Helper()
@@ -63,6 +63,15 @@ func (e *env) addCodes(t *testing.T, n int) {
 	if err != nil || res.Added != n {
 		t.Fatalf("загрузка кодов: %+v %v", res, err)
 	}
+}
+
+func (e *env) stats(t *testing.T) domain.PromoStats {
+	t.Helper()
+	st, err := e.promos().Stats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
 }
 
 func TestPromoAddDuplicates(t *testing.T) {
@@ -77,30 +86,30 @@ func TestPromoAddDuplicates(t *testing.T) {
 	if res.Added != 1 || res.Duplicates != 1 {
 		t.Fatalf("повторная загрузка не должна дублировать коды: %+v", res)
 	}
-	if st, _ := p.Stats(ctx); st.Free != 3 {
-		t.Fatalf("в пуле %d кодов, ожидали 3", st.Free)
+	if st := e.stats(t); st.Total != 3 || st.Available != 3 {
+		t.Fatalf("сводка: %+v", st)
 	}
 }
 
 func TestPromoIssuedOnAccept(t *testing.T) {
 	ctx := context.Background()
-	e := newEnv(t)
+	e := newEnv(t) // один код можно использовать 1 раз
 	e.addCodes(t, 2)
 	sc := e.importScenario(t, scenarioYAML).Scenario
 	id := e.assignOne(t, sc.ID, 1)
 
 	card, changed, err := e.tasks.Accept(ctx, 1, id)
-	if err != nil || !changed || card.Promo == nil || !card.NewPromo || card.PoolLeft != 1 {
+	if err != nil || !changed || card.Promo == nil || card.Promo.Outcome != domain.PromoActive || card.PromoReason != PromoReasonNone {
 		t.Fatalf("принятие с промокодом: err=%v changed=%v card=%+v", err, changed, card)
 	}
 	// Повторное принятие и повторный запрос кода не выдают второй.
 	e.tasks.Accept(ctx, 1, id)
 	again, err := e.tasks.IssuePromo(ctx, 1, id)
-	if err != nil || again.NewPromo || again.Promo.Code != card.Promo.Code {
+	if err != nil || again.Promo.Code != card.Promo.Code {
 		t.Fatalf("повторная выдача: err=%v %+v", err, again)
 	}
-	if st, _ := e.promos().Stats(ctx); st.Free != 1 || st.Issued != 1 {
-		t.Fatalf("статистика пула: %+v", st)
+	if st := e.stats(t); st.Available != 1 || st.Busy != 1 {
+		t.Fatalf("сводка: %+v", st)
 	}
 	// Чужой покупатель не может запросить код.
 	if _, err := e.tasks.IssuePromo(ctx, 2, id); err == nil {
@@ -108,28 +117,107 @@ func TestPromoIssuedOnAccept(t *testing.T) {
 	}
 }
 
-func TestPromoEmptyPoolThenLater(t *testing.T) {
+// Многоразовый код: пока задание активно, код занят; выполненное задание засчитывает
+// использование и возвращает код в оборот, пока лимит не исчерпан.
+func TestPromoReusableLifecycle(t *testing.T) {
+	ctx := context.Background()
+	e := newEnvUses(t, 2)
+	e.addCodes(t, 1)
+	sc := e.importScenario(t, scenarioYAML).Scenario
+	r := e.reports()
+
+	t1 := e.assignOne(t, sc.ID, 1)
+	c1, _, _ := e.tasks.Accept(ctx, 1, t1)
+	if c1.Promo == nil {
+		t.Fatal("первому заданию должен достаться код")
+	}
+	// Второе задание: код занят активным заданием, но использования ещё есть.
+	t2 := e.assignOne(t, sc.ID, 2)
+	c2, _, _ := e.tasks.Accept(ctx, 2, t2)
+	if c2.Promo != nil || c2.PromoReason != PromoReasonBusy {
+		t.Fatalf("код занят: promo=%v reason=%q", c2.Promo, c2.PromoReason)
+	}
+	if st := e.stats(t); st.Busy != 1 || st.Available != 0 || st.WithUsesLeft != 1 {
+		t.Fatalf("сводка при занятом коде: %+v", st)
+	}
+
+	// Первое задание выполнено: использование засчитано, код свободен (осталось 1 из 2).
+	res, err := r.Submit(ctx, 1, t1, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}})
+	if err != nil || res.PoolExhausted {
+		t.Fatalf("отчёт: err=%v exhausted=%v", err, res.PoolExhausted)
+	}
+	if st := e.stats(t); st.Available != 1 || st.Busy != 0 {
+		t.Fatalf("после выполнения код должен вернуться в оборот: %+v", st)
+	}
+	rows, _, _ := e.promos().List(ctx, 10, 0)
+	if len(rows) != 1 || rows[0].UsedCount != 1 || rows[0].Left != 1 || rows[0].TaskID != 0 {
+		t.Fatalf("таблица кодов: %+v", rows)
+	}
+
+	// Второе задание получает тот же код по кнопке.
+	c2, err = e.tasks.IssuePromo(ctx, 2, t2)
+	if err != nil || c2.Promo == nil || c2.Promo.Code != c1.Promo.Code {
+		t.Fatalf("повторная выдача: err=%v %+v", err, c2)
+	}
+	// Второе выполнение исчерпывает код: админу нужно предупреждение.
+	res, err = r.Submit(ctx, 2, t2, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}})
+	if err != nil || !res.PoolExhausted {
+		t.Fatalf("исчерпание пула: err=%v exhausted=%v", err, res.PoolExhausted)
+	}
+	if st := e.stats(t); st.Exhausted != 1 || st.WithUsesLeft != 0 || st.Available != 0 {
+		t.Fatalf("сводка после исчерпания: %+v", st)
+	}
+	// Третье задание: кодов с остатком нет вообще.
+	t3 := e.assignOne(t, sc.ID, 3)
+	c3, _, _ := e.tasks.Accept(ctx, 3, t3)
+	if c3.Promo != nil || c3.PromoReason != PromoReasonExhausted {
+		t.Fatalf("нет кодов с остатком: promo=%v reason=%q", c3.Promo, c3.PromoReason)
+	}
+	// Пополнение снимает проблему.
+	if _, err := e.promos().Add(ctx, firstAdmin, "NEWCODE1"); err != nil {
+		t.Fatal(err)
+	}
+	if c3, _ = e.tasks.IssuePromo(ctx, 3, t3); c3.Promo == nil || c3.Promo.Code != "NEWCODE1" {
+		t.Fatalf("после пополнения: %+v", c3.Promo)
+	}
+}
+
+// Отмена задания возвращает код в оборот, но использование не засчитывает.
+func TestPromoCancelReleasesWithoutCounting(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
-	sc := e.importScenario(t, scenarioYAML).Scenario
-	id := e.assignOne(t, sc.ID, 1)
-
-	card, changed, err := e.tasks.Accept(ctx, 1, id)
-	if err != nil || !changed || card.Promo != nil || card.Task.Status != domain.TaskAccepted {
-		t.Fatalf("пустой пул не должен мешать принятию: err=%v %+v", err, card)
-	}
 	e.addCodes(t, 1)
-	card, err = e.tasks.IssuePromo(ctx, 1, id)
-	if err != nil || card.Promo == nil || !card.NewPromo {
-		t.Fatalf("выдача после пополнения: err=%v %+v", err, card)
+	sc := e.importScenario(t, scenarioYAML).Scenario
+	id := e.acceptedTask(t, sc.ID, 1)
+	if st := e.stats(t); st.Busy != 1 {
+		t.Fatalf("код должен быть занят: %+v", st)
+	}
+	if ok, err := e.tasks.Cancel(ctx, firstAdmin, id); err != nil || !ok {
+		t.Fatalf("отмена: ok=%v err=%v", ok, err)
+	}
+	if st := e.stats(t); st.Available != 1 || st.Busy != 0 {
+		t.Fatalf("после отмены код свободен: %+v", st)
+	}
+	rows, _, _ := e.promos().List(ctx, 10, 0)
+	if rows[0].UsedCount != 0 {
+		t.Fatalf("отмена не должна засчитывать использование: %+v", rows[0])
+	}
+	card, _ := e.tasks.Card(ctx, id)
+	if card.Promo == nil || card.Promo.Outcome != domain.PromoReleased {
+		t.Fatalf("история выдачи: %+v", card.Promo)
+	}
+	// Код можно выдать новому заданию.
+	id2 := e.acceptedTask(t, sc.ID, 2)
+	if c, _ := e.tasks.Card(ctx, id2); c.Promo == nil {
+		t.Fatal("освобождённый код должен выдаваться снова")
 	}
 }
 
 // Главный тест: 30 покупателей одновременно принимают задания, кодов только 10.
-// Каждый код должен уйти ровно одному заданию.
+// Каждый код достаётся ровно одному активному заданию, остальные получают причину «заняты».
 func TestPromoConcurrentAcceptNoDuplicates(t *testing.T) {
 	ctx := context.Background()
-	e := newEnv(t)
+	e := newEnvUses(t, 3) // даже при трёх использованиях на код одновременно он держит одно задание
 	const buyers, codes = 30, 10
 	e.addBuyers(t, 100, 100+buyers-1)
 	e.addCodes(t, codes)
@@ -141,10 +229,10 @@ func TestPromoConcurrentAcceptNoDuplicates(t *testing.T) {
 	}
 
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		got     = map[string]int{}
-		without atomic.Int32
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		got  = map[string]int{}
+		busy atomic.Int32
 	)
 	for u, id := range taskOf {
 		wg.Add(1)
@@ -156,7 +244,9 @@ func TestPromoConcurrentAcceptNoDuplicates(t *testing.T) {
 				return
 			}
 			if card.Promo == nil {
-				without.Add(1)
+				if card.PromoReason == PromoReasonBusy {
+					busy.Add(1)
+				}
 				return
 			}
 			mu.Lock()
@@ -171,18 +261,18 @@ func TestPromoConcurrentAcceptNoDuplicates(t *testing.T) {
 	}
 	for code, n := range got {
 		if n != 1 {
-			t.Errorf("код %s выдан %d раз", code, n)
+			t.Errorf("код %s закреплён за %d заданиями одновременно", code, n)
 		}
 	}
-	if without.Load() != buyers-codes {
-		t.Errorf("без кода осталось %d заданий, ожидали %d", without.Load(), buyers-codes)
+	if busy.Load() != buyers-codes {
+		t.Errorf("с причиной «заняты» осталось %d заданий, ожидали %d", busy.Load(), buyers-codes)
 	}
-	if st, _ := e.promos().Stats(ctx); st.Free != 0 || st.Issued != codes {
-		t.Errorf("статистика пула: %+v", st)
+	if st := e.stats(t); st.Busy != codes || st.Available != 0 {
+		t.Errorf("сводка: %+v", st)
 	}
 }
 
-// Двадцать одновременных запросов кода по одному заданию должны израсходовать один код.
+// Двадцать одновременных запросов кода по одному заданию должны занять один код.
 func TestPromoConcurrentSameTask(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
@@ -218,28 +308,8 @@ func TestPromoConcurrentSameTask(t *testing.T) {
 			t.Fatalf("получены разные коды %s и %s", first, c)
 		}
 	}
-	if st, _ := e.promos().Stats(ctx); st.Issued != 1 || st.Free != 4 {
-		t.Fatalf("израсходован не один код: %+v", st)
-	}
-}
-
-func TestPromoMarkUsed(t *testing.T) {
-	ctx := context.Background()
-	e := newEnv(t)
-	e.addCodes(t, 1)
-	sc := e.importScenario(t, scenarioYAML).Scenario
-	id := e.assignOne(t, sc.ID, 1)
-	card, _, _ := e.tasks.Accept(ctx, 1, id)
-
-	p := e.promos()
-	if ok, err := p.MarkUsed(ctx, firstAdmin, card.Promo.ID); err != nil || !ok {
-		t.Fatalf("отметка: ok=%v err=%v", ok, err)
-	}
-	if ok, _ := p.MarkUsed(ctx, firstAdmin, card.Promo.ID); ok {
-		t.Fatal("повторная отметка не должна менять состояние")
-	}
-	if st, _ := p.Stats(ctx); st.Used != 1 || st.Issued != 0 {
-		t.Fatalf("статистика: %+v", st)
+	if st := e.stats(t); st.Busy != 1 || st.Available != 4 {
+		t.Fatalf("занят не один код: %+v", st)
 	}
 }
 
@@ -250,35 +320,46 @@ func TestPromoDelete(t *testing.T) {
 	if _, err := p.Add(ctx, firstAdmin, "AAA111\nBBB222\nCCC333\nDDD444"); err != nil {
 		t.Fatal(err)
 	}
-	// Один код выдаём заданию: его удалять нельзя.
+	// Один код занят активным заданием: его удалять нельзя.
 	sc := e.importScenario(t, scenarioYAML).Scenario
 	id := e.assignOne(t, sc.ID, 1)
 	card, _, _ := e.tasks.Accept(ctx, 1, id)
-	issued := card.Promo.Code
+	busyCode := card.Promo.Code
 
-	res, err := p.DeleteFree(ctx, firstAdmin, issued+"\nCCC333\nZZZ999\nCCC333\n!!")
+	res, err := p.DeleteFree(ctx, firstAdmin, busyCode+"\nZZZ999\nBBB222\nBBB222\n!!")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Удалён только свободный CCC333 (если выдан был другой). Выданный и несуществующий пропущены.
-	want := 1
-	if issued == "CCC333" {
-		want = 0
+	wantDeleted := 1
+	if busyCode == "BBB222" {
+		wantDeleted = 0
 	}
-	if res.Deleted != want || len(res.Invalid) != 1 {
-		t.Fatalf("удаление по списку: %+v (выдан был %s)", res, issued)
+	if res.Deleted != wantDeleted || len(res.Invalid) != 1 {
+		t.Fatalf("удаление по списку: %+v (занят был %s)", res, busyCode)
 	}
-	after, _ := p.ByTask(ctx, id)
-	if after == nil || after.Code != issued {
-		t.Fatal("выданный код должен остаться привязанным к заданию")
+	// Одиночное удаление: список из одного кода.
+	if res, _ := p.DeleteFree(ctx, firstAdmin, "CCC333"); busyCode != "CCC333" && res.Deleted != 1 {
+		t.Fatalf("удаление одного кода: %+v", res)
 	}
 
-	st, _ := p.Stats(ctx)
+	st := e.stats(t)
 	n, err := p.DeleteAllFree(ctx, firstAdmin)
-	if err != nil || n != st.Free {
-		t.Fatalf("удалить все свободные: n=%d err=%v, ожидали %d", n, err, st.Free)
+	if err != nil || n != st.Total-st.Busy {
+		t.Fatalf("удалить все незанятые: n=%d err=%v, ожидали %d", n, err, st.Total-st.Busy)
 	}
-	if st, _ := p.Stats(ctx); st.Free != 0 || st.Issued != 1 {
-		t.Fatalf("после удаления: %+v (выданный должен остаться)", st)
+	if st := e.stats(t); st.Total != 1 || st.Busy != 1 {
+		t.Fatalf("занятый код должен остаться: %+v", st)
+	}
+
+	// После выполнения задания код (уже не занятый) удаляется, а история выдачи остаётся.
+	if _, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := p.DeleteAllFree(ctx, firstAdmin); n != 1 {
+		t.Fatalf("удалено %d, ожидали 1", n)
+	}
+	after, _ := e.tasks.Card(ctx, id)
+	if after.Promo == nil || after.Promo.Code != busyCode || after.Promo.Outcome != domain.PromoUsed {
+		t.Fatalf("история выдачи должна пережить удаление кода: %+v", after.Promo)
 	}
 }

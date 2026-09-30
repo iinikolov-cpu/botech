@@ -18,8 +18,8 @@ type Config struct {
 	Location     *time.Location
 	LogLevel     string
 
-	// PromoLowThreshold: при таком остатке промокодов в пуле админы получают предупреждение.
-	PromoLowThreshold int
+	// PromoMaxUses: сколько раз можно использовать каждый промокод (переменная PROMO_LOW_THRESHOLD).
+	PromoMaxUses int
 }
 
 // Load читает и проверяет переменные окружения.
@@ -47,13 +47,13 @@ func Load() (*Config, error) {
 	}
 	c.Location = loc
 
-	c.PromoLowThreshold = 5
+	c.PromoMaxUses = 1
 	if v := strings.TrimSpace(os.Getenv("PROMO_LOW_THRESHOLD")); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return nil, errors.New("PROMO_LOW_THRESHOLD должна быть неотрицательным числом")
+		if err != nil || n < 1 {
+			return nil, errors.New("PROMO_LOW_THRESHOLD (сколько раз можно использовать промокод) должна быть числом от 1")
 		}
-		c.PromoLowThreshold = n
+		c.PromoMaxUses = n
 	}
 	return c, nil
 }

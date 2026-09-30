@@ -165,10 +165,11 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	}
 	sb.WriteString("\n")
 	if c.Promo != nil {
-		state := "выдан"
-		if c.Promo.Status == domain.PromoUsed {
-			state = "использован"
-		}
+		state := map[domain.PromoOutcome]string{
+			domain.PromoActive:   "закреплён за заданием",
+			domain.PromoUsed:     "использован",
+			domain.PromoReleased: "возвращён в оборот, задание отменено",
+		}[c.Promo.Outcome]
 		fmt.Fprintf(&sb, "Промокод: <code>%s</code> (%s)\n", esc(c.Promo.Code), state)
 	}
 	if c.Comp != nil {
@@ -198,9 +199,6 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	}
 	if c.Task.Status == domain.TaskReported || c.Task.Status == domain.TaskReviewed {
 		rows = append(rows, row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(id))))
-	}
-	if c.Promo != nil && c.Promo.Status == domain.PromoIssued {
-		rows = append(rows, row(btn("🎁 Промокод использован", fmt.Sprintf("adm:pru:%d:t:%d", c.Promo.ID, id))))
 	}
 	rows = append(rows, row(btn("« К заданиям", "adm:tk:a:0")))
 	return sb.String(), kb(rows...)

@@ -113,6 +113,18 @@ func (f *fakeTG) lastTo(chat int64) (sentMsg, bool) {
 	return sentMsg{}, false
 }
 
+// anyTo true, если чату отправляли сообщение с подстрокой (не только последнее).
+func (f *fakeTG) anyTo(chat int64, substr string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.sent {
+		if m.Chat == chat && strings.Contains(m.Text, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeTG) lastAnswer() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -133,7 +145,10 @@ func newTestBot(t *testing.T) (*bot.Bot, *fakeTG) {
 	return e.b, e.tg
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+func newTestEnv(t *testing.T) *testEnv { return newTestEnvUses(t, 1) }
+
+// newTestEnvUses то же, но с заданным лимитом использований промокода.
+func newTestEnvUses(t *testing.T, promoUses int) *testEnv {
 	t.Helper()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -149,10 +164,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	srv := httptest.NewServer(http.HandlerFunc(tg.handler))
 	t.Cleanup(srv.Close)
 
-	tasks := service.NewTasks(store)
+	tasks := service.NewTasks(store, promoUses)
 	app := New(Services{
 		Access: access, Scenarios: service.NewScenarios(store), Tasks: tasks, Dialog: service.NewDialog(store),
-		Promos: service.NewPromos(store), Reports: service.NewReports(store, tasks), PromoLowThreshold: 2,
+		Promos: service.NewPromos(store, promoUses), Reports: service.NewReports(store, tasks),
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.UTC)
 	b, err := bot.New("123:TEST",
 		bot.WithSkipGetMe(), bot.WithServerURL(srv.URL), bot.WithNotAsyncHandlers(),
@@ -311,8 +326,8 @@ func TestScenarioAndTaskFlow(t *testing.T) {
 	if got := e.tg.last(); !strings.Contains(got, "принято") || !strings.Contains(got, "Выполнить до") {
 		t.Fatalf("карточка после принятия: %q", got)
 	}
-	if n, _ := e.tg.lastTo(testAdmin); !strings.Contains(n.Text, "принял задание") {
-		t.Fatalf("админ не уведомлён: %q", n.Text)
+	if !e.tg.anyTo(testAdmin, "принял задание") {
+		t.Fatal("админ не уведомлён о принятии")
 	}
 	// Повторное нажатие и отказ после принятия ничего не ломают.
 	e.click(2000, "tsk:ac:1")
@@ -425,14 +440,19 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 	if got := e.tg.last(); !strings.Contains(got, "AAA111") {
 		t.Fatalf("промокод не показан покупателю: %q", got)
 	}
-	// Второе принятие: остаток 2 = порогу, админ получает предупреждение.
+	// Второе принятие: выдан BBB222, предупреждений нет (коды ещё есть).
 	assign(2001)
 	e.click(2001, "tsk:ac:2")
 	if got := e.tg.last(); !strings.Contains(got, "BBB222") {
 		t.Fatalf("второй код: %q", got)
 	}
-	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Text, "осталось: <b>2</b>") {
-		t.Fatalf("нет предупреждения о нехватке: %q", m.Text)
+	if e.tg.anyTo(testAdmin, "⚠") {
+		t.Fatal("предупреждений быть не должно, пока есть свободные коды")
+	}
+	// Таблица кодов: два занятых, два свободных.
+	e.click(testAdmin, "adm:prl:0")
+	if got := e.tg.last(); !strings.Contains(got, "AAA111") || !strings.Contains(got, "#1") || !strings.Contains(got, "CCC333") {
+		t.Fatalf("таблица кодов: %q", got)
 	}
 
 	// Мастер отчёта.
@@ -511,6 +531,11 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 	if got := e.tg.last(); !strings.Contains(got, "Записей: 0") {
 		t.Fatalf("после выплаты список к выплате должен быть пуст: %q", got)
 	}
+	// Выполненное задание засчитало использование: AAA111 свободен и исчерпан (лимит 1), BBB222 ещё занят.
+	e.click(testAdmin, "adm:prl:0")
+	if got := e.tg.last(); !strings.Contains(got, "0 из 1") || !strings.Contains(got, "#2") {
+		t.Fatalf("таблица после выполнения: %q", got)
+	}
 	// Задание можно отметить проверенным.
 	e.click(testAdmin, "adm:rv:1:ok")
 	e.click(testAdmin, "adm:tc:1")
@@ -555,11 +580,11 @@ func TestPromoDeleteFlow(t *testing.T) {
 		t.Fatalf("удаление по списку: %q", got)
 	}
 	e.click(testAdmin, "adm:prda")
-	if got := e.tg.last(); !strings.Contains(got, "Удалить все свободные промокоды (2 шт.)") {
+	if got := e.tg.last(); !strings.Contains(got, "Удалить все незанятые промокоды (2 шт.)") {
 		t.Fatalf("подтверждение: %q", got)
 	}
 	e.click(testAdmin, "adm:prdy")
-	if got := e.tg.last(); !strings.Contains(got, "Свободно: <b>0</b>") {
+	if got := e.tg.last(); !strings.Contains(got, "Доступно для выдачи: <b>0</b>") {
 		t.Fatalf("после удаления всех: %q", got)
 	}
 }
@@ -615,5 +640,89 @@ func TestTaskDeleteAndCancelFlow(t *testing.T) {
 	e.click(2000, "tsk:rp:2")
 	if got := e.tg.lastAnswer(); !strings.Contains(got, "отменено") {
 		t.Fatalf("отчёт по отменённому: %q", got)
+	}
+}
+
+// completeReport проходит мастер отчёта для reportFlowScenario без компенсации.
+func (e *testEnv) completeReport(t *testing.T, user, taskID int64) {
+	t.Helper()
+	e.click(user, fmt.Sprintf("tsk:rp:%d", taskID))
+	e.press(t, user, "rpt:r:", ":5")
+	e.press(t, user, "rpt:y:", ":yes")
+	e.sendPhoto(user, "P")
+	e.press(t, user, "rpt:s:", "")
+	e.press(t, user, "rpt:ca:", ":0")
+	e.press(t, user, "rpt:ok:", "")
+}
+
+// Многоразовый код и предупреждения админу: все коды заняты; коды закончились.
+func TestPromoReuseWarningsAndTable(t *testing.T) {
+	e := newTestEnvUses(t, 2) // каждый код можно использовать дважды
+	e.addBuyer(t, 2000, "Алия")
+	e.addBuyer(t, 2001, "Борис")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.click(testAdmin, "adm:pra")
+	e.say(testAdmin, "ONLY001")
+
+	assign := func(user int64) {
+		for _, d := range []string{"adm:as:0", "adm:as:s:1", "adm:as:d:3", fmt.Sprintf("adm:as:t:%d:0", user), "adm:as:go"} {
+			e.click(testAdmin, d)
+		}
+	}
+	assign(2000)
+	e.click(2000, "tsk:ac:1")
+	if got := e.tg.last(); !strings.Contains(got, "ONLY001") {
+		t.Fatalf("первый покупатель без кода: %q", got)
+	}
+
+	// Второй покупатель: единственный код занят, использования ещё есть.
+	assign(2001)
+	e.click(2001, "tsk:ac:2")
+	if got := e.tg.last(); !strings.Contains(got, "Промокод пока недоступен") {
+		t.Fatalf("карточка без кода: %q", got)
+	}
+	if !e.tg.anyTo(testAdmin, "Все промокоды заняты активными заданиями") {
+		t.Fatal("нет предупреждения «все коды заняты»")
+	}
+
+	// Таблица: код закреплён за заданием #1, осталось 2 из 2.
+	e.click(testAdmin, "adm:prl:0")
+	if got := e.tg.last(); !strings.Contains(got, "<pre>") || !strings.Contains(got, "ONLY001") || !strings.Contains(got, "2 из 2") || !strings.Contains(got, "#1") {
+		t.Fatalf("таблица занятого кода: %q", got)
+	}
+	e.click(testAdmin, "adm:pr")
+	if got := e.tg.last(); !strings.Contains(got, "Использований на код: <b>2</b>") || !strings.Contains(got, "Все коды сейчас заняты") {
+		t.Fatalf("сводка: %q", got)
+	}
+
+	// Занятый код удалить нельзя.
+	e.click(testAdmin, "adm:prdl")
+	e.say(testAdmin, "ONLY001")
+	if got := e.tg.last(); !strings.Contains(got, "Удалено кодов: <b>0</b>") {
+		t.Fatalf("удаление занятого: %q", got)
+	}
+
+	// Первое задание выполнено: код свободен (1 из 2), без предупреждения об исчерпании.
+	e.completeReport(t, 2000, 1)
+	e.click(testAdmin, "adm:prl:0")
+	if got := e.tg.last(); !strings.Contains(got, "1 из 2") || !strings.Contains(got, " нет") {
+		t.Fatalf("таблица после выполнения: %q", got)
+	}
+	if e.tg.anyTo(testAdmin, "Не осталось ни одного промокода") {
+		t.Fatal("рано предупреждать об исчерпании: осталось одно использование")
+	}
+
+	// Второй покупатель забирает код по кнопке и выполняет задание: коды закончились.
+	e.click(2001, "tsk:pc:2")
+	if got := e.tg.last(); !strings.Contains(got, "ONLY001") {
+		t.Fatalf("код по кнопке: %q", got)
+	}
+	e.completeReport(t, 2001, 2)
+	if !e.tg.anyTo(testAdmin, "Не осталось ни одного промокода со свободными использованиями") {
+		t.Fatal("нет предупреждения об исчерпании кодов")
+	}
+	e.click(testAdmin, "adm:pr")
+	if got := e.tg.last(); !strings.Contains(got, "Нет ни одного кода со свободными использованиями") || !strings.Contains(got, "Исчерпаны: 1") {
+		t.Fatalf("сводка после исчерпания: %q", got)
 	}
 }

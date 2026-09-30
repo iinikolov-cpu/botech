@@ -43,6 +43,8 @@ type SubmitResult struct {
 	Report     *domain.Report
 	Late       bool
 	DupReceipt int64 // задание, в котором уже был такой же файл чека (0, если нет)
+	// PoolExhausted: после этого отчёта не осталось ни одного промокода со свободными использованиями.
+	PoolExhausted bool
 }
 
 // Reports принимает отчёты и ведёт компенсации.
@@ -199,6 +201,20 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			details = "с опозданием"
 		}
 		res.Late, res.Report = late, rep
+
+		// Выполненное задание засчитывает использование кода, и код возвращается в оборот.
+		if released, err := r.Promos.Release(ctx, taskID, true, now); err != nil {
+			return err
+		} else if released {
+			if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: taskID, Kind: "promo_used", Details: "использование промокода засчитано", At: now}); err != nil {
+				return err
+			}
+			st, err := r.Promos.Stats(ctx, s.tasks.PromoMaxUses())
+			if err != nil {
+				return err
+			}
+			res.PoolExhausted = st.WithUsesLeft == 0
+		}
 		return r.Tasks.AddEvent(ctx, &domain.TaskEvent{
 			TaskID: taskID, Kind: "status", FromStatus: t.Status, ToStatus: domain.TaskReported, ActorID: userID, Details: details, At: now,
 		})

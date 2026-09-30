@@ -88,22 +88,31 @@ type FSMRepo interface {
 	Clear(ctx context.Context, userID int64) error
 }
 
-// PromoRepo пул промокодов.
+// PromoRow строка таблицы кодов для админа.
+type PromoRow struct {
+	Code         string
+	UsedCount    int
+	ActiveTaskID int64
+}
+
+// PromoRepo пул промокодов. maxUses везде общий лимит использований одного кода.
 type PromoRepo interface {
 	// AddBatch добавляет коды, уже существующие пропускает. Возвращает число добавленных.
 	AddBatch(ctx context.Context, codes []string, addedBy int64, at time.Time) (int, error)
-	// Issue атомарно выдаёт свободный код заданию. ErrNotFound, если пул пуст.
-	// Если заданию код уже выдан, возвращает его (повторной выдачи нет).
-	Issue(ctx context.Context, taskID, userID int64, at time.Time) (*domain.PromoCode, error)
-	ByTask(ctx context.Context, taskID int64) (*domain.PromoCode, error) // ErrNotFound, если не выдан
-	Get(ctx context.Context, id int64) (*domain.PromoCode, error)
-	Stats(ctx context.Context) (domain.PromoStats, error)
-	// ListIssued выданные коды: used=false только неиспользованные, true только использованные.
-	ListIssued(ctx context.Context, used bool, limit, offset int) ([]*domain.PromoCode, int, error)
-	MarkUsed(ctx context.Context, id, by int64, at time.Time) (bool, error)
-	// DeleteFree удаляет только свободные коды из списка (выданные и использованные не трогает).
+	// Issue выдаёт заданию свободный код с остатком использований. Вызывать внутри транзакции.
+	// Если заданию код уже выдан, возвращает его. ErrNotFound, если подходящего кода нет.
+	Issue(ctx context.Context, taskID, userID int64, maxUses int, at time.Time) (*domain.PromoAssignment, error)
+	// ByTask выдача по заданию (ErrNotFound, если кода не выдавали).
+	ByTask(ctx context.Context, taskID int64) (*domain.PromoAssignment, error)
+	// Release завершает активную выдачу задания: used=true засчитывает использование,
+	// false просто возвращает код в оборот. false, если активной выдачи нет.
+	Release(ctx context.Context, taskID int64, used bool, at time.Time) (bool, error)
+	Stats(ctx context.Context, maxUses int) (domain.PromoStats, error)
+	// List страница таблицы кодов (незанятые и занятые вперемешку, по порядку добавления).
+	List(ctx context.Context, limit, offset int) ([]PromoRow, int, error)
+	// DeleteFree удаляет из списка только коды, не занятые активными заданиями.
 	DeleteFree(ctx context.Context, codes []string) (int, error)
-	// DeleteAllFree удаляет все свободные коды.
+	// DeleteAllFree удаляет все коды, не занятые активными заданиями.
 	DeleteAllFree(ctx context.Context) (int, error)
 }
 

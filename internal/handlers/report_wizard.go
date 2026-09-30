@@ -442,6 +442,9 @@ func (a *App) submitReport(ctx context.Context, b *bot.Bot, u *domain.User, st *
 		msg += fmt.Sprintf("\n⚠ Этот файл чека уже прикладывали в задании #%d. Проверьте.", res.DupReceipt)
 	}
 	a.notifyAdmins(ctx, b, msg, kb(row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(st.TaskID)))))
+	if res.PoolExhausted {
+		a.notifyAdmins(ctx, b, "⚠ Не осталось ни одного промокода со свободными использованиями. Загрузите новые коды.", kb(row(btn("🎁 Промокоды", "adm:pr"))))
+	}
 }
 
 // largestPhoto возвращает file_id и file_unique_id самого крупного варианта фото.

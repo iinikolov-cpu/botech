@@ -18,14 +18,27 @@ const (
 
 // Tasks управляет заданиями и их статусами.
 type Tasks struct {
-	store storage.Store
-	now   func() time.Time
+	store        storage.Store
+	now          func() time.Time
+	promoMaxUses int // сколько раз можно использовать один промокод
 }
 
-// NewTasks создаёт сервис заданий.
-func NewTasks(store storage.Store) *Tasks {
-	return &Tasks{store: store, now: time.Now}
+// NewTasks создаёт сервис заданий. promoMaxUses: лимит использований одного промокода.
+func NewTasks(store storage.Store, promoMaxUses int) *Tasks {
+	return &Tasks{store: store, now: time.Now, promoMaxUses: promoMaxUses}
 }
+
+// PromoMaxUses лимит использований одного промокода.
+func (s *Tasks) PromoMaxUses() int { return s.promoMaxUses }
+
+// PromoReason почему заданию не удалось выдать промокод.
+type PromoReason string
+
+const (
+	PromoReasonNone      PromoReason = ""          // код выдан (или не требовался)
+	PromoReasonBusy      PromoReason = "busy"      // все коды с остатком заняты активными заданиями
+	PromoReasonExhausted PromoReason = "exhausted" // нет ни одного кода со свободными использованиями
+)
 
 // TaskCard задание вместе со связанными данными для показа.
 type TaskCard struct {
@@ -33,12 +46,11 @@ type TaskCard struct {
 	Scenario *domain.Scenario
 	Version  *domain.ScenarioVersion // именно та версия, по которой выдано задание
 	User     *domain.User
-	Promo    *domain.PromoCode    // выданный промокод (nil, если не выдан)
-	Comp     *domain.Compensation // данные компенсации (nil, если нет)
+	Promo    *domain.PromoAssignment // выдача промокода (nil, если не выдавали)
+	Comp     *domain.Compensation    // данные компенсации (nil, если нет)
 
-	// Заполняются только результатом Accept и IssuePromo.
-	NewPromo bool // код выдан именно этим вызовом
-	PoolLeft int  // сколько свободных кодов осталось после выдачи
+	// PromoReason заполняется результатом Accept и IssuePromo, когда кода нет.
+	PromoReason PromoReason
 }
 
 // AssignResult итог назначения нескольким покупателям.
@@ -148,15 +160,14 @@ func (s *Tasks) byBuyer(ctx context.Context, userID, taskID int64, to domain.Tas
 		return nil, false, err
 	}
 	var (
-		issued bool
-		left   int
+		reason PromoReason
 		hook   func(storage.Repos, *domain.Task, time.Time) error
 	)
 	if to == domain.TaskAccepted {
 		// Промокод выдаётся в той же транзакции, что и принятие: либо оба действия, либо ни одного.
 		hook = func(r storage.Repos, t *domain.Task, now time.Time) error {
 			var err error
-			issued, left, err = issuePromo(ctx, r, t, now)
+			_, reason, err = issuePromo(ctx, r, t, s.promoMaxUses, now)
 			return err
 		}
 	}
@@ -166,42 +177,41 @@ func (s *Tasks) byBuyer(ctx context.Context, userID, taskID int64, to domain.Tas
 	}
 	card, err := s.Card(ctx, taskID)
 	if card != nil && changed {
-		card.NewPromo, card.PoolLeft = issued, left
+		card.PromoReason = reason
 	}
 	return card, changed, err
 }
 
 // issuePromo выдаёт заданию код из пула (если он ещё не выдан) и пишет событие в историю.
-// Пустой пул не ошибка: задание остаётся без кода, админа предупредит вызывающий.
-func issuePromo(ctx context.Context, r storage.Repos, t *domain.Task, now time.Time) (issued bool, left int, err error) {
-	if _, err := r.Promos.ByTask(ctx, t.ID); err == nil {
-		return false, 0, nil // уже выдан ранее
+// Отсутствие подходящего кода не ошибка: возвращается причина, а админа предупредит вызывающий.
+func issuePromo(ctx context.Context, r storage.Repos, t *domain.Task, maxUses int, now time.Time) (*domain.PromoAssignment, PromoReason, error) {
+	if a, err := r.Promos.ByTask(ctx, t.ID); err == nil {
+		return a, PromoReasonNone, nil // уже выдан ранее
 	} else if !errors.Is(err, storage.ErrNotFound) {
-		return false, 0, err
+		return nil, PromoReasonNone, err
 	}
-	_, err = r.Promos.Issue(ctx, t.ID, t.UserID, now)
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-		return false, 0, r.Tasks.AddEvent(ctx, &domain.TaskEvent{
-			TaskID: t.ID, Kind: "promo_missing", Details: "пул промокодов пуст", At: now,
-		})
-	case err != nil:
-		return false, 0, err
+	a, err := r.Promos.Issue(ctx, t.ID, t.UserID, maxUses, now)
+	if errors.Is(err, storage.ErrNotFound) {
+		st, err := r.Promos.Stats(ctx, maxUses)
+		if err != nil {
+			return nil, PromoReasonNone, err
+		}
+		reason, details := PromoReasonBusy, "все промокоды заняты активными заданиями"
+		if st.WithUsesLeft == 0 {
+			reason, details = PromoReasonExhausted, "нет промокодов со свободными использованиями"
+		}
+		return nil, reason, r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: t.ID, Kind: "promo_missing", Details: details, At: now})
 	}
-	if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: t.ID, Kind: "promo_issued", Details: "выдан промокод", At: now}); err != nil {
-		return false, 0, err
+	if err != nil {
+		return nil, PromoReasonNone, err
 	}
-	st, err := r.Promos.Stats(ctx)
-	return true, st.Free, err
+	return a, PromoReasonNone, r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: t.ID, Kind: "promo_issued", Details: "выдан промокод", At: now})
 }
 
-// IssuePromo выдаёт промокод принятому заданию, если при принятии пул был пуст.
+// IssuePromo выдаёт промокод принятому заданию, если при принятии свободного кода не было.
 // Повторный вызов ничего не выдаёт: код один на задание.
 func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard, error) {
-	var (
-		issued bool
-		left   int
-	)
+	var reason PromoReason
 	err := s.store.WithTx(ctx, func(r storage.Repos) error {
 		t, err := r.Tasks.Get(ctx, taskID)
 		if errors.Is(err, storage.ErrNotFound) || (err == nil && t.UserID != userID) {
@@ -213,7 +223,7 @@ func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard
 		if t.Status != domain.TaskAccepted && t.Status != domain.TaskExpired {
 			return fmt.Errorf("%w: промокод выдаётся принятым заданиям", ErrForbidden)
 		}
-		issued, left, err = issuePromo(ctx, r, t, s.now().UTC())
+		_, reason, err = issuePromo(ctx, r, t, s.promoMaxUses, s.now().UTC())
 		return err
 	})
 	if err != nil {
@@ -221,7 +231,7 @@ func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard
 	}
 	card, err := s.Card(ctx, taskID)
 	if card != nil {
-		card.NewPromo, card.PoolLeft = issued, left
+		card.PromoReason = reason
 	}
 	return card, err
 }
@@ -311,10 +321,14 @@ func (s *Tasks) Delete(ctx context.Context, admin, taskID int64) error {
 	})
 }
 
-// Cancel отменяет задание в работе (принято или просрочено). Выданный промокод остаётся
-// закреплённым за заданием: покупатель мог им воспользоваться.
+// Cancel отменяет задание в работе (принято или просрочено). Промокод возвращается в оборот.
 func (s *Tasks) Cancel(ctx context.Context, admin, taskID int64) (bool, error) {
-	changed, err := s.transition(ctx, taskID, 0, domain.TaskCancelled, "отменено админом", nil)
+	// Код возвращается в оборот без списания использования: задание не выполнено.
+	release := func(r storage.Repos, t *domain.Task, now time.Time) error {
+		_, err := r.Promos.Release(ctx, t.ID, false, now)
+		return err
+	}
+	changed, err := s.transition(ctx, taskID, 0, domain.TaskCancelled, "отменено админом", release)
 	if err != nil || !changed {
 		return changed, err
 	}

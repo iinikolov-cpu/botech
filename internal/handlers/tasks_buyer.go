@@ -40,9 +40,9 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	}
 	canHavePromo := t.Status == domain.TaskAccepted || t.Status == domain.TaskExpired
 	switch {
-	case c.Promo != nil:
+	case c.Promo != nil && c.Promo.Outcome == domain.PromoActive:
 		sb.WriteString("\n" + i18n.T(l, "promo_line", esc(c.Promo.Code)) + "\n")
-	case canHavePromo:
+	case canHavePromo && c.Promo == nil:
 		sb.WriteString("\n" + i18n.T(l, "promo_pending") + "\n")
 	}
 
@@ -134,11 +134,10 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 		card = got
 		if card.Promo == nil {
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "promo_none_yet"), true)
-			a.notifyAdmins(ctx, b, fmt.Sprintf("⚠ Пул промокодов пуст: %s ждёт код (задание #%d). Загрузите коды в разделе «Промокоды».", userLabel(u), id), kb(row(btn("🎁 Промокоды", "adm:pr"))))
+			a.warnNoPromo(ctx, b, card)
 			return
 		}
 		a.answerCB(ctx, b, cb.ID, i18n.T(l, "promo_got"), false)
-		a.warnPool(ctx, b, card)
 	case "dc": // сначала подтверждение: отказ необратим
 		a.answerCB(ctx, b, cb.ID, "", false)
 		a.edit(ctx, b, cb, i18n.T(l, "confirm_decline"), kb(row(
@@ -165,9 +164,7 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_accepted", a.fmtTime(card.Task.DueAt)), true)
 			a.notifyCreator(ctx, b, card, "✅ принял задание", "срок до "+a.fmtTime(card.Task.DueAt))
 			if card.Promo == nil {
-				a.notifyAdmins(ctx, b, fmt.Sprintf("⚠ Пул промокодов пуст: %s принял задание #%d, но код не выдан. Покупатель сможет получить его кнопкой позже. Загрузите коды.", userLabel(card.User), card.Task.ID), kb(row(btn("🎁 Промокоды", "adm:pr"))))
-			} else {
-				a.warnPool(ctx, b, card)
+				a.warnNoPromo(ctx, b, card)
 			}
 		default:
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_declined"), true)
@@ -208,12 +205,17 @@ func (a *App) deliverTask(ctx context.Context, b *bot.Bot, taskID int64) bool {
 	return true
 }
 
-// warnPool предупреждает админов, когда после выдачи в пуле осталось ровно пороговое число кодов
-// (или ноль). Равенство, а не «меньше», чтобы предупреждение приходило один раз, а не при каждой выдаче.
-func (a *App) warnPool(ctx context.Context, b *bot.Bot, c *service.TaskCard) {
-	if !c.NewPromo || (c.PoolLeft != a.promoLow && c.PoolLeft != 0) {
+// warnNoPromo предупреждает админов, что заданию не хватило промокода, и объясняет причину.
+func (a *App) warnNoPromo(ctx context.Context, b *bot.Bot, c *service.TaskCard) {
+	var text string
+	switch c.PromoReason {
+	case service.PromoReasonBusy:
+		text = fmt.Sprintf("⚠ Все промокоды заняты активными заданиями, а задание #%d (%s) ждёт код. "+
+			"Код освободится, когда кто-то выполнит или отменит своё задание. Можно загрузить новые коды.", c.Task.ID, userLabel(c.User))
+	case service.PromoReasonExhausted:
+		text = fmt.Sprintf("⚠ Не осталось ни одного промокода со свободными использованиями, а задание #%d (%s) ждёт код. Загрузите новые коды.", c.Task.ID, userLabel(c.User))
+	default:
 		return
 	}
-	text := fmt.Sprintf("⚠ Промокодов в пуле осталось: <b>%d</b>. Загрузите новые.", c.PoolLeft)
-	a.notifyAdmins(ctx, b, text, kb(row(btn("➕ Загрузить коды", "adm:pra"))))
+	a.notifyAdmins(ctx, b, text, kb(row(btn("🎁 Промокоды", "adm:pr"))))
 }

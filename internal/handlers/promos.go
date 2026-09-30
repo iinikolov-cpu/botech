@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -20,7 +21,7 @@ const (
 // maxPromoFile лимит размера файла с промокодами.
 const maxPromoFile = 512 * 1024
 
-// promoCallback экраны раздела «Промокоды»: adm:pr, adm:pra, adm:pri:<стр>, adm:pru:<id>:<l|t>:<арг>.
+// promoCallback экраны раздела «Промокоды»: adm:pr, adm:pra, adm:prc, adm:prl:<стр>, adm:prd*.
 func (a *App) promoCallback(ctx context.Context, b *bot.Bot, admin *domain.User, parts []string) (string, *models.InlineKeyboardMarkup, string) {
 	arg := func(i int) string {
 		if i < len(parts) {
@@ -34,24 +35,29 @@ func (a *App) promoCallback(ctx context.Context, b *bot.Bot, admin *domain.User,
 			a.log.Error("состояние загрузки промокодов", "err", err)
 		}
 		return "<b>Загрузка промокодов</b>\n\nОтправьте коды одним из способов:\n" +
-				"• сообщением: по одному коду в строке;\n" +
+				"• сообщением: один код или несколько, по одному в строке;\n" +
 				"• файлом .csv или .txt (по одному коду в строке, если колонок несколько, берётся первая).\n\n" +
 				"Повторяющиеся коды пропускаются автоматически.",
 			kb(row(btn("Отмена", "adm:prc"))), ""
+	case "prl":
+		page, _ := strconv.Atoi(arg(2))
+		t, m := a.screenPromoTable(ctx, page)
+		return t, m, ""
 	case "prd": // меню удаления
 		st, _ := a.promos.Stats(ctx)
-		return fmt.Sprintf("<b>Удаление промокодов</b>\n\nМожно удалить только <b>свободные</b> коды (сейчас их %d). "+
-				"Выданные и использованные коды не удаляются: по ним ведётся учёт.", st.Free), kb(
-				row(btn("🗑 Удалить все свободные", "adm:prda")),
-				row(btn("✂ Удалить по списку", "adm:prdl")),
+		return fmt.Sprintf("<b>Удаление промокодов</b>\n\nВсего кодов: %d, из них занято активными заданиями: %d. "+
+				"Занятые коды удалить нельзя, пока задание не завершено или не отменено.", st.Total, st.Busy), kb(
+				row(btn("✂ Удалить один или несколько", "adm:prdl")),
+				row(btn("🗑 Удалить все незанятые", "adm:prda")),
 				row(btn("« Назад", "adm:pr")),
 			), ""
 	case "prda": // подтверждение
 		st, _ := a.promos.Stats(ctx)
-		if st.Free == 0 {
-			return "Свободных кодов нет, удалять нечего.", kb(row(btn("« Назад", "adm:pr"))), ""
+		n := st.Total - st.Busy
+		if n == 0 {
+			return "Незанятых кодов нет, удалять нечего.", kb(row(btn("« Назад", "adm:pr"))), ""
 		}
-		return fmt.Sprintf("Удалить все свободные промокоды (%d шт.)? Это нельзя отменить.", st.Free),
+		return fmt.Sprintf("Удалить все незанятые промокоды (%d шт.)? Это нельзя отменить.", n),
 			kb(row(btn("Да, удалить", "adm:prdy"), btn("Отмена", "adm:pr"))), ""
 	case "prdy":
 		n, err := a.promos.DeleteAllFree(ctx, admin.TgID)
@@ -59,40 +65,17 @@ func (a *App) promoCallback(ctx context.Context, b *bot.Bot, admin *domain.User,
 			a.log.Error("удаление промокодов", "err", err)
 			return "Не удалось удалить, подробности в логах.", kb(row(btn("« Назад", "adm:pr"))), ""
 		}
-		a.log.Info("свободные промокоды удалены", "admin", maskID(admin.TgID), "count", n)
+		a.log.Info("незанятые промокоды удалены", "admin", maskID(admin.TgID), "count", n)
 		t, m := a.screenPromos(ctx)
 		return t, m, fmt.Sprintf("Удалено: %d", n)
 	case "prdl": // удаление по списку
 		if err := a.dialog.Set(ctx, admin.TgID, promoDelDialog, struct{}{}); err != nil {
 			a.log.Error("состояние удаления промокодов", "err", err)
 		}
-		return "<b>Удаление по списку</b>\n\nОтправьте коды, которые нужно удалить: сообщением или файлом .csv/.txt, по одному в строке. " +
-			"Удалятся только свободные коды из списка.", kb(row(btn("Отмена", "adm:prc"))), ""
+		return "<b>Удаление по списку</b>\n\nОтправьте код (или несколько): сообщением или файлом .csv/.txt, по одному в строке. " +
+			"Удалятся только коды, не занятые активными заданиями.", kb(row(btn("Отмена", "adm:prc"))), ""
 	case "prc":
 		_ = a.dialog.Clear(ctx, admin.TgID)
-		t, m := a.screenPromos(ctx)
-		return t, m, ""
-	case "pri":
-		page, _ := strconv.Atoi(arg(2))
-		t, m := a.screenPromoIssued(ctx, page)
-		return t, m, ""
-	case "pru":
-		id, _ := strconv.ParseInt(arg(2), 10, 64)
-		toast := "Отмечено"
-		if ok, err := a.promos.MarkUsed(ctx, admin.TgID, id); err != nil {
-			a.log.Error("отметка промокода", "err", err)
-			toast = "Ошибка, подробности в логах"
-		} else if !ok {
-			toast = "Уже отмечено"
-		}
-		if arg(3) == "t" { // вернуться в карточку задания
-			taskID, _ := strconv.ParseInt(arg(4), 10, 64)
-			t, m := a.screenTask(ctx, taskID)
-			return t, m, toast
-		}
-		page, _ := strconv.Atoi(arg(4))
-		t, m := a.screenPromoIssued(ctx, page)
-		return t, m, toast
 	}
 	t, m := a.screenPromos(ctx)
 	return t, m, ""
@@ -103,52 +86,73 @@ func (a *App) screenPromos(ctx context.Context) (string, *models.InlineKeyboardM
 	if err != nil {
 		a.log.Error("статистика промокодов", "err", err)
 	}
-	text := fmt.Sprintf("<b>Промокоды</b>\n\nСвободно: <b>%d</b>\nВыдано (не использовано): %d\nИспользовано: %d\n",
-		st.Free, st.Issued, st.Used)
-	if st.Free == 0 {
-		text += "\n⚠ Пул пуст: покупатели не получат промокоды при принятии заданий."
-	} else if st.Free <= a.promoLow {
-		text += fmt.Sprintf("\n⚠ Промокоды заканчиваются (порог предупреждения: %d).", a.promoLow)
+	text := fmt.Sprintf("<b>Промокоды</b>\n\nИспользований на код: <b>%d</b>\nВсего кодов: %d\n"+
+		"Доступно для выдачи: <b>%d</b>\nЗаняты активными заданиями: %d\nИсчерпаны: %d\n",
+		a.promos.MaxUses(), st.Total, st.Available, st.Busy, st.Exhausted)
+	switch {
+	case st.WithUsesLeft == 0:
+		text += "\n⚠ Нет ни одного кода со свободными использованиями. Загрузите новые коды."
+	case st.Available == 0:
+		text += "\n⚠ Все коды сейчас заняты активными заданиями."
 	}
 	return text, kb(
-		row(btn("➕ Загрузить коды", "adm:pra")),
-		row(btn("📤 Выданные коды", "adm:pri:0"), btn("🗑 Удалить коды", "adm:prd")),
+		row(btn("📋 Список кодов", "adm:prl:0")),
+		row(btn("➕ Загрузить коды", "adm:pra"), btn("🗑 Удалить коды", "adm:prd")),
 		row(btn("« Назад", "adm:home")),
 	)
 }
 
-func (a *App) screenPromoIssued(ctx context.Context, page int) (string, *models.InlineKeyboardMarkup) {
+const promoPageSize = 20
+
+// screenPromoTable таблица кодов: сколько использований осталось и есть ли активное задание.
+func (a *App) screenPromoTable(ctx context.Context, page int) (string, *models.InlineKeyboardMarkup) {
 	if page < 0 {
 		page = 0
 	}
-	list, total, err := a.promos.Issued(ctx, false, pageSize, page*pageSize)
+	list, total, err := a.promos.List(ctx, promoPageSize, page*promoPageSize)
 	if err != nil {
-		a.log.Error("выданные промокоды", "err", err)
+		a.log.Error("список промокодов", "err", err)
 		return "Не удалось загрузить список.", kb(row(btn("« Назад", "adm:pr")))
 	}
+	max := a.promos.MaxUses()
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "<b>Выданные коды</b> (не использованы: %d)\nНажмите кнопку, когда покупатель использовал код.\n\n", total)
-	var rows [][]models.InlineKeyboardButton
-	for _, it := range list {
-		name := itoa(it.Code.UserID)
-		if it.User != nil && strings.TrimSpace(it.User.FirstName) != "" {
-			name = strings.TrimSpace(it.User.FirstName)
+	fmt.Fprintf(&sb, "<b>Список кодов</b> (всего: %d)\n\n", total)
+	if total == 0 {
+		sb.WriteString("Кодов пока нет.")
+	} else {
+		// Моноширинный блок: Telegram не умеет таблицы, так колонки выровнены пробелами.
+		sb.WriteString("<pre>")
+		sb.WriteString(padRight("Код", 16) + " " + padRight("Осталось", 8) + " Задание\n")
+		for _, r := range list {
+			task := "нет"
+			if r.TaskID != 0 {
+				task = "#" + itoa(r.TaskID)
+			}
+			fmt.Fprintf(&sb, "%s %s %s\n", padRight(esc(cut(r.Code, 16)), 16), padRight(fmt.Sprintf("%d из %d", r.Left, max), 8), task)
 		}
-		fmt.Fprintf(&sb, "<code>%s</code> · %s · %s · задание #%d\n", esc(it.Code.Code), esc(name), a.fmtTime(it.Code.IssuedAt), it.Code.TaskID)
-		rows = append(rows, row(btn(cut("✔ Использован: "+it.Code.Code, 60), fmt.Sprintf("adm:pru:%d:l:%d", it.Code.ID, page))))
+		sb.WriteString("</pre>\nОсталось: сколько раз код ещё можно использовать. Задание: активное задание, за которым код закреплён сейчас.")
 	}
 	var nav []models.InlineKeyboardButton
 	if page > 0 {
-		nav = append(nav, btn("‹", fmt.Sprintf("adm:pri:%d", page-1)))
+		nav = append(nav, btn("‹", fmt.Sprintf("adm:prl:%d", page-1)))
 	}
-	if (page+1)*pageSize < total {
-		nav = append(nav, btn("›", fmt.Sprintf("adm:pri:%d", page+1)))
+	if (page+1)*promoPageSize < total {
+		nav = append(nav, btn("›", fmt.Sprintf("adm:prl:%d", page+1)))
 	}
+	var rows [][]models.InlineKeyboardButton
 	if len(nav) > 0 {
 		rows = append(rows, nav)
 	}
 	rows = append(rows, row(btn("« Назад", "adm:pr")))
 	return sb.String(), kb(rows...)
+}
+
+// padRight дополняет строку пробелами до n символов (считая руны, а не байты).
+func padRight(s string, n int) string {
+	if l := utf8.RuneCountInString(s); l < n {
+		return s + strings.Repeat(" ", n-l)
+	}
+	return s
 }
 
 // importPromos загружает коды из текста и отвечает итогом.
@@ -192,7 +196,7 @@ func (a *App) deletePromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	a.log.Info("промокоды удалены по списку", "admin", maskID(admin.TgID), "count", res.Deleted)
 	text := fmt.Sprintf("🗑 Удалено кодов: <b>%d</b>\n", res.Deleted)
 	if res.Skipped > 0 {
-		text += fmt.Sprintf("Не удалено (нет в пуле или уже выданы): %d\n", res.Skipped)
+		text += fmt.Sprintf("Не удалено (нет в пуле или занято активным заданием): %d\n", res.Skipped)
 	}
 	if len(res.Invalid) > 0 {
 		text += fmt.Sprintf("Не похоже на код: %d\n", len(res.Invalid))

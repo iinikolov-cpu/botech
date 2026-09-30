@@ -2,32 +2,45 @@ package domain
 
 import "time"
 
-// PromoStatus состояние промокода в пуле.
-type PromoStatus string
-
-const (
-	PromoFree   PromoStatus = "free"
-	PromoIssued PromoStatus = "issued"
-	PromoUsed   PromoStatus = "used"
-)
-
-// PromoCode промокод на оплату доставки.
+// PromoCode промокод в пуле. Код многоразовый: сколько раз его можно использовать
+// всего, определяет общая настройка (PromoMaxUses), а здесь хранится, сколько раз уже использован.
 type PromoCode struct {
-	ID        int64
-	Code      string
-	Status    PromoStatus
-	TaskID    int64
-	UserID    int64
-	AddedBy   int64
-	CreatedAt time.Time
-	IssuedAt  time.Time
-	UsedAt    time.Time
-	UsedBy    int64
+	ID           int64
+	Code         string
+	UsedCount    int   // сколько заданий уже выполнено с этим кодом
+	ActiveTaskID int64 // задание, за которым код закреплён сейчас (0, если код свободен)
+	AddedBy      int64
+	CreatedAt    time.Time
 }
 
-// PromoStats остатки пула.
+// PromoOutcome чем закончилась выдача кода заданию.
+type PromoOutcome string
+
+const (
+	PromoActive   PromoOutcome = "active"   // задание в работе, код закреплён за ним
+	PromoUsed     PromoOutcome = "used"     // задание выполнено, использование засчитано
+	PromoReleased PromoOutcome = "released" // задание отменено, использование не засчитано
+)
+
+// PromoAssignment выдача кода заданию.
+type PromoAssignment struct {
+	ID         int64
+	PromoID    int64
+	Code       string
+	TaskID     int64
+	UserID     int64
+	IssuedAt   time.Time
+	FinishedAt time.Time
+	Outcome    PromoOutcome
+}
+
+// PromoStats сводка по пулу (при заданном лимите использований).
 type PromoStats struct {
-	Free, Issued, Used int
+	Total        int // всего кодов
+	Available    int // можно выдать прямо сейчас: не заняты и есть остаток использований
+	Busy         int // закреплены за активными заданиями
+	Exhausted    int // не заняты, но использования закончились
+	WithUsesLeft int // коды с остатком использований (свободные и занятые вместе)
 }
 
 // Answer ответ на вопрос чек-листа.

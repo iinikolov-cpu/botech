@@ -24,8 +24,6 @@ type Services struct {
 	Dialog    *service.Dialog
 	Promos    *service.Promos
 	Reports   *service.Reports
-
-	PromoLowThreshold int // при каком остатке кодов предупреждать админов
 }
 
 // App хранит зависимости обработчиков.
@@ -36,7 +34,6 @@ type App struct {
 	dialog      *service.Dialog
 	promos      *service.Promos
 	reports     *service.Reports
-	promoLow    int
 	log         *slog.Logger
 	loc         *time.Location
 	botUsername string
@@ -49,7 +46,7 @@ type App struct {
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
-		promos: svc.Promos, reports: svc.Reports, promoLow: svc.PromoLowThreshold, log: log, loc: loc,
+		promos: svc.Promos, reports: svc.Reports, log: log, loc: loc,
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}

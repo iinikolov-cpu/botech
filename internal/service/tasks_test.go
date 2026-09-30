@@ -29,15 +29,18 @@ type env struct {
 	tasks     *Tasks
 }
 
-// newEnv поднимает все сервисы на временной БД и создаёт активных покупателей 1..3.
-func newEnv(t *testing.T) *env {
+// newEnv поднимает все сервисы на временной БД, каждый промокод можно использовать 1 раз.
+func newEnv(t *testing.T) *env { return newEnvUses(t, 1) }
+
+// newEnvUses то же, но с заданным лимитом использований промокода. Создаёт покупателей 1..3.
+func newEnvUses(t *testing.T, promoUses int) *env {
 	t.Helper()
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	e := &env{store: store, access: NewAccess(store, firstAdmin), scenarios: NewScenarios(store), tasks: NewTasks(store)}
+	e := &env{store: store, access: NewAccess(store, firstAdmin), scenarios: NewScenarios(store), tasks: NewTasks(store, promoUses)}
 	ctx := context.Background()
 	if err := e.access.EnsureFirstAdmin(ctx); err != nil {
 		t.Fatal(err)

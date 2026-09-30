@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -57,12 +56,18 @@ func ParseCodes(raw string) (valid, invalid []string) {
 
 // Promos управляет пулом промокодов.
 type Promos struct {
-	store storage.Store
-	now   func() time.Time
+	store   storage.Store
+	now     func() time.Time
+	maxUses int // сколько раз можно использовать каждый код
 }
 
-// NewPromos создаёт сервис промокодов.
-func NewPromos(store storage.Store) *Promos { return &Promos{store: store, now: time.Now} }
+// NewPromos создаёт сервис промокодов. maxUses: сколько раз можно использовать каждый код.
+func NewPromos(store storage.Store, maxUses int) *Promos {
+	return &Promos{store: store, now: time.Now, maxUses: maxUses}
+}
+
+// MaxUses лимит использований одного кода.
+func (p *Promos) MaxUses() int { return p.maxUses }
 
 // AddResult итог загрузки кодов.
 type AddResult struct {
@@ -101,70 +106,45 @@ func (p *Promos) Add(ctx context.Context, actor int64, raw string) (*AddResult, 
 	return res, err
 }
 
-// Stats остатки пула.
+// Stats сводка по пулу.
 func (p *Promos) Stats(ctx context.Context) (domain.PromoStats, error) {
-	return p.store.Repos().Promos.Stats(ctx)
+	return p.store.Repos().Promos.Stats(ctx, p.maxUses)
 }
 
-// IssuedItem выданный код с именем получателя.
-type IssuedItem struct {
-	Code *domain.PromoCode
-	User *domain.User
+// Row строка таблицы кодов.
+type Row struct {
+	Code      string
+	UsedCount int
+	Left      int   // сколько раз код ещё можно использовать
+	TaskID    int64 // активное задание (0, если код свободен)
 }
 
-// Issued страница выданных (used=false) или использованных (used=true) кодов.
-func (p *Promos) Issued(ctx context.Context, used bool, limit, offset int) ([]IssuedItem, int, error) {
-	r := p.store.Repos()
-	list, total, err := r.Promos.ListIssued(ctx, used, limit, offset)
+// List страница таблицы кодов с общим числом.
+func (p *Promos) List(ctx context.Context, limit, offset int) ([]Row, int, error) {
+	list, total, err := p.store.Repos().Promos.List(ctx, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	out := make([]IssuedItem, 0, len(list))
+	out := make([]Row, 0, len(list))
 	for _, c := range list {
-		u, err := r.Users.Get(ctx, c.UserID)
-		if err != nil && !errors.Is(err, storage.ErrNotFound) {
-			return nil, 0, err
+		left := p.maxUses - c.UsedCount
+		if left < 0 {
+			left = 0
 		}
-		out = append(out, IssuedItem{Code: c, User: u})
+		out = append(out, Row{Code: c.Code, UsedCount: c.UsedCount, Left: left, TaskID: c.ActiveTaskID})
 	}
 	return out, total, nil
-}
-
-// MarkUsed отмечает код использованным (вручную, админом).
-func (p *Promos) MarkUsed(ctx context.Context, actor, id int64) (bool, error) {
-	changed := false
-	err := p.store.WithTx(ctx, func(r storage.Repos) error {
-		now := p.now().UTC()
-		ok, err := r.Promos.MarkUsed(ctx, id, actor, now)
-		if err != nil || !ok {
-			return err
-		}
-		changed = true
-		return r.Audit.Add(ctx, &domain.AuditEntry{
-			AdminID: actor, Action: "promo.used", Entity: "promo", EntityID: fmt.Sprint(id), At: now,
-		})
-	})
-	return changed, err
-}
-
-// ByTask код задания (nil, если не выдан).
-func (p *Promos) ByTask(ctx context.Context, taskID int64) (*domain.PromoCode, error) {
-	c, err := p.store.Repos().Promos.ByTask(ctx, taskID)
-	if errors.Is(err, storage.ErrNotFound) {
-		return nil, nil
-	}
-	return c, err
 }
 
 // DeleteResult итог удаления кодов.
 type DeleteResult struct {
 	Deleted int
-	Skipped int // не найдены среди свободных (нет в пуле, уже выданы или использованы)
+	Skipped int // не удалены: нет в пуле или заняты активным заданием
 	Invalid []string
 }
 
-// DeleteFree удаляет из пула свободные коды из списка. Выданные и использованные коды
-// не удаляются никогда: по ним ведётся учёт.
+// DeleteFree удаляет из пула коды из списка (по одному или пачкой). Коды, закреплённые за
+// активными заданиями, не удаляются: их сначала должны завершить. История выдач сохраняется.
 func (p *Promos) DeleteFree(ctx context.Context, actor int64, raw string) (*DeleteResult, error) {
 	valid, invalid := ParseCodes(raw)
 	seen := make(map[string]bool, len(valid))
@@ -189,7 +169,7 @@ func (p *Promos) DeleteFree(ctx context.Context, actor int64, raw string) (*Dele
 	return res, err
 }
 
-// DeleteAllFree удаляет все свободные коды и возвращает их число.
+// DeleteAllFree удаляет все коды, не занятые активными заданиями, и возвращает их число.
 func (p *Promos) DeleteAllFree(ctx context.Context, actor int64) (int, error) {
 	n := 0
 	err := p.store.WithTx(ctx, func(r storage.Repos) error {

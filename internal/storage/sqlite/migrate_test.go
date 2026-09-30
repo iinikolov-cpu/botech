@@ -72,3 +72,62 @@ func TestMigrationKeepsData(t *testing.T) {
 		t.Fatal("уникальный индекс активных заданий должен работать после миграции")
 	}
 }
+
+// Переход на многоразовые промокоды: свободные, выданные и использованные коды
+// переносятся в новую схему с сохранением смысла.
+func TestMigrationPromoReusable(t *testing.T) {
+	ctx := context.Background()
+	s, err := openRaw(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.applyMigrations(ctx, 4); err != nil {
+		t.Fatal(err)
+	}
+	db := s.DB()
+	for _, q := range []string{
+		`INSERT INTO promo_codes (code, status, added_by, created_at) VALUES ('FREE1','free',1,1)`,
+		`INSERT INTO promo_codes (code, status, task_id, user_id, added_by, created_at, issued_at) VALUES ('ISSUED1','issued',5,9,1,1,10)`,
+		`INSERT INTO promo_codes (code, status, task_id, user_id, added_by, created_at, issued_at, used_at) VALUES ('USED1','used',6,9,1,1,10,20)`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := s.applyMigrations(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	type row struct {
+		used   int
+		active int64
+	}
+	got := map[string]row{}
+	rows, err := db.QueryContext(ctx, `SELECT code, used_count, active_task_id FROM promo_codes`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var c string
+		var r row
+		if err := rows.Scan(&c, &r.used, &r.active); err != nil {
+			t.Fatal(err)
+		}
+		got[c] = r
+	}
+	rows.Close()
+	want := map[string]row{"FREE1": {0, 0}, "ISSUED1": {0, 5}, "USED1": {1, 0}}
+	for c, w := range want {
+		if got[c] != w {
+			t.Errorf("%s: получили %+v, ожидали %+v", c, got[c], w)
+		}
+	}
+	var outcome string
+	if err := db.QueryRowContext(ctx, `SELECT outcome FROM promo_assignments WHERE task_id = 6`).Scan(&outcome); err != nil || outcome != "used" {
+		t.Errorf("история выдачи использованного кода: %q %v", outcome, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT outcome FROM promo_assignments WHERE task_id = 5`).Scan(&outcome); err != nil || outcome != "active" {
+		t.Errorf("история выдачи активного кода: %q %v", outcome, err)
+	}
+}

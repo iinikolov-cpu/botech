@@ -105,7 +105,7 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
 	case "as":
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
-	case "pr", "pra", "prc", "pri", "pru", "prd", "prda", "prdy", "prdl":
+	case "pr", "pra", "prc", "prl", "prd", "prda", "prdy", "prdl":
 		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
 	case "cp", "cc", "cpd", "cpy", "rv":
 		text, markup, toast = a.compCallback(ctx, b, admin, parts)
@@ -139,8 +139,8 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 	}
 	text := fmt.Sprintf("<b>Админ-панель</b>\n\nАктивных покупателей: %d\nЗаявок на рассмотрении: %d", nActive, nPending)
 	if st, err := a.promos.Stats(ctx); err == nil {
-		text += fmt.Sprintf("\nПромокодов свободно: %d", st.Free)
-		if st.Free <= a.promoLow {
+		text += fmt.Sprintf("\nПромокодов доступно: %d из %d", st.Available, st.Total)
+		if st.WithUsesLeft == 0 {
 			text += " ⚠"
 		}
 	}
