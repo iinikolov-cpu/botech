@@ -98,6 +98,10 @@ type PromoRepo interface {
 	// ListIssued выданные коды: used=false только неиспользованные, true только использованные.
 	ListIssued(ctx context.Context, used bool, limit, offset int) ([]*domain.PromoCode, int, error)
 	MarkUsed(ctx context.Context, id, by int64, at time.Time) (bool, error)
+	// DeleteFree удаляет только свободные коды из списка (выданные и использованные не трогает).
+	DeleteFree(ctx context.Context, codes []string) (int, error)
+	// DeleteAllFree удаляет все свободные коды.
+	DeleteAllFree(ctx context.Context) (int, error)
 }
 
 // ReportRepo отчёты и ответы.

@@ -12,7 +12,10 @@ import (
 	"botech/internal/domain"
 )
 
-const promoAddDialog = "promo_add"
+const (
+	promoAddDialog = "promo_add"
+	promoDelDialog = "promo_del"
+)
 
 // maxPromoFile лимит размера файла с промокодами.
 const maxPromoFile = 512 * 1024
@@ -35,6 +38,36 @@ func (a *App) promoCallback(ctx context.Context, b *bot.Bot, admin *domain.User,
 				"• файлом .csv или .txt (по одному коду в строке, если колонок несколько, берётся первая).\n\n" +
 				"Повторяющиеся коды пропускаются автоматически.",
 			kb(row(btn("Отмена", "adm:prc"))), ""
+	case "prd": // меню удаления
+		st, _ := a.promos.Stats(ctx)
+		return fmt.Sprintf("<b>Удаление промокодов</b>\n\nМожно удалить только <b>свободные</b> коды (сейчас их %d). "+
+				"Выданные и использованные коды не удаляются: по ним ведётся учёт.", st.Free), kb(
+				row(btn("🗑 Удалить все свободные", "adm:prda")),
+				row(btn("✂ Удалить по списку", "adm:prdl")),
+				row(btn("« Назад", "adm:pr")),
+			), ""
+	case "prda": // подтверждение
+		st, _ := a.promos.Stats(ctx)
+		if st.Free == 0 {
+			return "Свободных кодов нет, удалять нечего.", kb(row(btn("« Назад", "adm:pr"))), ""
+		}
+		return fmt.Sprintf("Удалить все свободные промокоды (%d шт.)? Это нельзя отменить.", st.Free),
+			kb(row(btn("Да, удалить", "adm:prdy"), btn("Отмена", "adm:pr"))), ""
+	case "prdy":
+		n, err := a.promos.DeleteAllFree(ctx, admin.TgID)
+		if err != nil {
+			a.log.Error("удаление промокодов", "err", err)
+			return "Не удалось удалить, подробности в логах.", kb(row(btn("« Назад", "adm:pr"))), ""
+		}
+		a.log.Info("свободные промокоды удалены", "admin", maskID(admin.TgID), "count", n)
+		t, m := a.screenPromos(ctx)
+		return t, m, fmt.Sprintf("Удалено: %d", n)
+	case "prdl": // удаление по списку
+		if err := a.dialog.Set(ctx, admin.TgID, promoDelDialog, struct{}{}); err != nil {
+			a.log.Error("состояние удаления промокодов", "err", err)
+		}
+		return "<b>Удаление по списку</b>\n\nОтправьте коды, которые нужно удалить: сообщением или файлом .csv/.txt, по одному в строке. " +
+			"Удалятся только свободные коды из списка.", kb(row(btn("Отмена", "adm:prc"))), ""
 	case "prc":
 		_ = a.dialog.Clear(ctx, admin.TgID)
 		t, m := a.screenPromos(ctx)
@@ -79,7 +112,7 @@ func (a *App) screenPromos(ctx context.Context) (string, *models.InlineKeyboardM
 	}
 	return text, kb(
 		row(btn("➕ Загрузить коды", "adm:pra")),
-		row(btn("📤 Выданные коды", "adm:pri:0")),
+		row(btn("📤 Выданные коды", "adm:pri:0"), btn("🗑 Удалить коды", "adm:prd")),
 		row(btn("« Назад", "adm:home")),
 	)
 }
@@ -146,6 +179,27 @@ func (a *App) importPromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	a.send(ctx, b, admin.TgID, sb.String(), back)
 }
 
+// deletePromos удаляет свободные коды из присланного списка и отвечает итогом.
+func (a *App) deletePromos(ctx context.Context, b *bot.Bot, admin *domain.User, raw string) {
+	back := kb(row(btn("🎁 К промокодам", "adm:pr")))
+	res, err := a.promos.DeleteFree(ctx, admin.TgID, raw)
+	if err != nil {
+		a.log.Error("удаление промокодов по списку", "err", err)
+		a.send(ctx, b, admin.TgID, "Не удалось удалить, подробности в логах.", back)
+		return
+	}
+	_ = a.dialog.Clear(ctx, admin.TgID)
+	a.log.Info("промокоды удалены по списку", "admin", maskID(admin.TgID), "count", res.Deleted)
+	text := fmt.Sprintf("🗑 Удалено кодов: <b>%d</b>\n", res.Deleted)
+	if res.Skipped > 0 {
+		text += fmt.Sprintf("Не удалено (нет в пуле или уже выданы): %d\n", res.Skipped)
+	}
+	if len(res.Invalid) > 0 {
+		text += fmt.Sprintf("Не похоже на код: %d\n", len(res.Invalid))
+	}
+	a.send(ctx, b, admin.TgID, text, back)
+}
+
 // onPromoFile принимает файл .csv или .txt с промокодами.
 func (a *App) onPromoFile(ctx context.Context, b *bot.Bot, admin *domain.User, doc *models.Document) {
 	back := kb(row(btn("🎁 К промокодам", "adm:pr")))
@@ -157,6 +211,10 @@ func (a *App) onPromoFile(ctx context.Context, b *bot.Bot, admin *domain.User, d
 	if err != nil {
 		a.log.Error("скачивание файла промокодов", "err", err)
 		a.send(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
+		return
+	}
+	if state, _ := a.dialog.Get(ctx, admin.TgID, nil); state == promoDelDialog {
+		a.deletePromos(ctx, b, admin, string(data))
 		return
 	}
 	a.importPromos(ctx, b, admin, string(data))

@@ -542,3 +542,24 @@ func TestEmptyPoolThenGetPromo(t *testing.T) {
 		t.Fatalf("код после пополнения: %q", got)
 	}
 }
+
+// Удаление промокодов из бота: по списку и все свободные, с подтверждением.
+func TestPromoDeleteFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.click(testAdmin, "adm:pra")
+	e.say(testAdmin, "AAA111\nBBB222\nCCC333")
+
+	e.click(testAdmin, "adm:prdl")
+	e.say(testAdmin, "BBB222\nNOPE999")
+	if got := e.tg.last(); !strings.Contains(got, "Удалено кодов: <b>1</b>") || !strings.Contains(got, "Не удалено") {
+		t.Fatalf("удаление по списку: %q", got)
+	}
+	e.click(testAdmin, "adm:prda")
+	if got := e.tg.last(); !strings.Contains(got, "Удалить все свободные промокоды (2 шт.)") {
+		t.Fatalf("подтверждение: %q", got)
+	}
+	e.click(testAdmin, "adm:prdy")
+	if got := e.tg.last(); !strings.Contains(got, "Свободно: <b>0</b>") {
+		t.Fatalf("после удаления всех: %q", got)
+	}
+}

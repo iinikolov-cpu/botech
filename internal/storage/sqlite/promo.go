@@ -145,3 +145,26 @@ func (r *promoRepo) MarkUsed(ctx context.Context, id, by int64, at time.Time) (b
 	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
+
+func (r *promoRepo) DeleteFree(ctx context.Context, codes []string) (int, error) {
+	total := 0
+	for _, c := range codes {
+		// Условие status = 'free' в самом запросе: выданный код удалить нельзя, даже если он в списке.
+		res, err := r.q.ExecContext(ctx, `DELETE FROM promo_codes WHERE code = ? AND status = 'free'`, c)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += int(n)
+	}
+	return total, nil
+}
+
+func (r *promoRepo) DeleteAllFree(ctx context.Context) (int, error) {
+	res, err := r.q.ExecContext(ctx, `DELETE FROM promo_codes WHERE status = 'free'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

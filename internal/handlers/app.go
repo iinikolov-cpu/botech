@@ -92,6 +92,11 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 			a.importPromos(ctx, b, u, m.Text)
 			return
 		}
+	case promoDelDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.deletePromos(ctx, b, u, m.Text)
+			return
+		}
 	}
 	if m.Text != "" {
 		a.send(ctx, b, u.TgID, i18n.T(lang(u), "help_buyer"), nil)

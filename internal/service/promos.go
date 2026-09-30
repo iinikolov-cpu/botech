@@ -155,3 +155,51 @@ func (p *Promos) ByTask(ctx context.Context, taskID int64) (*domain.PromoCode, e
 	}
 	return c, err
 }
+
+// DeleteResult итог удаления кодов.
+type DeleteResult struct {
+	Deleted int
+	Skipped int // не найдены среди свободных (нет в пуле, уже выданы или использованы)
+	Invalid []string
+}
+
+// DeleteFree удаляет из пула свободные коды из списка. Выданные и использованные коды
+// не удаляются никогда: по ним ведётся учёт.
+func (p *Promos) DeleteFree(ctx context.Context, actor int64, raw string) (*DeleteResult, error) {
+	valid, invalid := ParseCodes(raw)
+	seen := make(map[string]bool, len(valid))
+	unique := make([]string, 0, len(valid))
+	for _, c := range valid {
+		if !seen[c] {
+			seen[c] = true
+			unique = append(unique, c)
+		}
+	}
+	res := &DeleteResult{Invalid: invalid}
+	err := p.store.WithTx(ctx, func(r storage.Repos) error {
+		n, err := r.Promos.DeleteFree(ctx, unique)
+		if err != nil {
+			return err
+		}
+		res.Deleted, res.Skipped = n, len(unique)-n
+		return r.Audit.Add(ctx, &domain.AuditEntry{
+			AdminID: actor, Action: "promo.delete", Entity: "promo", Details: fmt.Sprintf("удалено %d", n), At: p.now().UTC(),
+		})
+	})
+	return res, err
+}
+
+// DeleteAllFree удаляет все свободные коды и возвращает их число.
+func (p *Promos) DeleteAllFree(ctx context.Context, actor int64) (int, error) {
+	n := 0
+	err := p.store.WithTx(ctx, func(r storage.Repos) error {
+		var err error
+		if n, err = r.Promos.DeleteAllFree(ctx); err != nil {
+			return err
+		}
+		return r.Audit.Add(ctx, &domain.AuditEntry{
+			AdminID: actor, Action: "promo.delete_all_free", Entity: "promo", Details: fmt.Sprintf("удалено %d", n), At: p.now().UTC(),
+		})
+	})
+	return n, err
+}

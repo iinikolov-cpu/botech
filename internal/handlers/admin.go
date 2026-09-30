@@ -105,7 +105,7 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
 	case "as":
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
-	case "pr", "pra", "prc", "pri", "pru":
+	case "pr", "pra", "prc", "pri", "pru", "prd", "prda", "prdy", "prdl":
 		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
 	case "cp", "cc", "cpd", "cpy", "rv":
 		text, markup, toast = a.compCallback(ctx, b, admin, parts)

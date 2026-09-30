@@ -242,3 +242,43 @@ func TestPromoMarkUsed(t *testing.T) {
 		t.Fatalf("статистика: %+v", st)
 	}
 }
+
+func TestPromoDelete(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	p := e.promos()
+	if _, err := p.Add(ctx, firstAdmin, "AAA111\nBBB222\nCCC333\nDDD444"); err != nil {
+		t.Fatal(err)
+	}
+	// Один код выдаём заданию: его удалять нельзя.
+	sc := e.importScenario(t, scenarioYAML).Scenario
+	id := e.assignOne(t, sc.ID, 1)
+	card, _, _ := e.tasks.Accept(ctx, 1, id)
+	issued := card.Promo.Code
+
+	res, err := p.DeleteFree(ctx, firstAdmin, issued+"\nCCC333\nZZZ999\nCCC333\n!!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Удалён только свободный CCC333 (если выдан был другой). Выданный и несуществующий пропущены.
+	want := 1
+	if issued == "CCC333" {
+		want = 0
+	}
+	if res.Deleted != want || len(res.Invalid) != 1 {
+		t.Fatalf("удаление по списку: %+v (выдан был %s)", res, issued)
+	}
+	after, _ := p.ByTask(ctx, id)
+	if after == nil || after.Code != issued {
+		t.Fatal("выданный код должен остаться привязанным к заданию")
+	}
+
+	st, _ := p.Stats(ctx)
+	n, err := p.DeleteAllFree(ctx, firstAdmin)
+	if err != nil || n != st.Free {
+		t.Fatalf("удалить все свободные: n=%d err=%v, ожидали %d", n, err, st.Free)
+	}
+	if st, _ := p.Stats(ctx); st.Free != 0 || st.Issued != 1 {
+		t.Fatalf("после удаления: %+v (выданный должен остаться)", st)
+	}
+}
