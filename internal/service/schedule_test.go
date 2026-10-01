@@ -9,8 +9,7 @@ import (
 func TestNextStep(t *testing.T) {
 	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
 	h := func(n int) time.Time { return base.Add(time.Duration(n) * time.Hour) }
-	offsets := HoursToDurations([]int{24, 48})
-	esc := 24 * time.Hour
+	offsets := MinutesToDurations([]int{24 * 60, 48 * 60})
 
 	tests := []struct {
 		name string
@@ -22,82 +21,45 @@ func TestNextStep(t *testing.T) {
 		{"ровно в момент первого", h(24), nil, Step{Remind: 1}},
 		{"первое уже отправлено", h(25), map[int]bool{1: true}, Step{}},
 		{"второе напоминание", h(48), map[int]bool{1: true}, Step{Remind: 2}},
-		{"между вторым и эскалацией", h(60), map[int]bool{1: true, 2: true}, Step{}},
-		{"эскалация через сутки после последнего", h(72), map[int]bool{1: true, 2: true}, Step{Escalate: true}},
-		{"эскалация уже была", h(100), map[int]bool{0: true, 1: true, 2: true}, Step{}},
+		{"после последнего тишина", h(500), map[int]bool{1: true, 2: true}, Step{}},
 		{"бот долго не работал: только последнее, первое пропущено", h(60), nil, Step{Remind: 2, Skipped: []int{1}}},
 		{"после пропуска ничего лишнего", h(61), map[int]bool{1: true, 2: true}, Step{}},
-		{"эскалации нет, пока не отправлено последнее напоминание", h(80), map[int]bool{1: true}, Step{Remind: 2}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := NextStep(base, tc.now, offsets, esc, tc.done); !reflect.DeepEqual(got, tc.want) {
+			if got := NextStep(base, tc.now, offsets, tc.done); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("получили %+v, ожидали %+v", got, tc.want)
 			}
 		})
 	}
 
 	t.Run("нет интервалов", func(t *testing.T) {
-		if got := NextStep(base, h(500), nil, esc, nil); !reflect.DeepEqual(got, Step{}) {
+		if got := NextStep(base, h(500), nil, nil); !reflect.DeepEqual(got, Step{}) {
 			t.Fatalf("без интервалов ничего не делаем: %+v", got)
 		}
 	})
 	t.Run("нулевой базовый момент", func(t *testing.T) {
-		if got := NextStep(time.Time{}, h(500), offsets, esc, nil); !reflect.DeepEqual(got, Step{}) {
+		if got := NextStep(time.Time{}, h(500), offsets, nil); !reflect.DeepEqual(got, Step{}) {
 			t.Fatalf("нет базы: %+v", got)
 		}
 	})
-	t.Run("один интервал и эскалация", func(t *testing.T) {
-		one := HoursToDurations([]int{10})
-		if got := NextStep(base, h(10), one, esc, nil); got.Remind != 1 {
-			t.Fatalf("%+v", got)
+	t.Run("интервалы в минутах", func(t *testing.T) {
+		m := MinutesToDurations([]int{5, 10})
+		if got := NextStep(base, base.Add(5*time.Minute), m, nil); got.Remind != 1 {
+			t.Fatalf("через 5 минут: %+v", got)
 		}
-		if got := NextStep(base, h(34), one, esc, map[int]bool{1: true}); !got.Escalate {
-			t.Fatalf("%+v", got)
+		if got := NextStep(base, base.Add(4*time.Minute), m, nil); got.Remind != 0 {
+			t.Fatalf("через 4 минуты рано: %+v", got)
 		}
 	})
 }
 
-func TestParseHours(t *testing.T) {
-	tests := []struct {
-		in      string
-		want    []int
-		wantErr bool
-	}{
-		{"24,48", []int{24, 48}, false},
-		{" 24; 48 ", []int{24, 48}, false},
-		{"12 24 72", []int{12, 24, 72}, false},
-		{"off", nil, false},
-		{"", nil, false},
-		{"48,24", nil, true},       // не по возрастанию
-		{"24,24", nil, true},       // повтор
-		{"0,5", nil, true},         // ноль
-		{"abc", nil, true},         // не число
-		{"721", nil, true},         // слишком много
-		{"1,2,3,4,5,6", nil, true}, // больше лимита
-	}
-	for _, tc := range tests {
-		got, err := ParseHours(tc.in)
-		if (err != nil) != tc.wantErr || (!tc.wantErr && !reflect.DeepEqual(got, tc.want)) {
-			t.Errorf("ParseHours(%q) = %v, %v; ожидали %v (ошибка=%v)", tc.in, got, err, tc.want, tc.wantErr)
-		}
-	}
-}
-
-func TestParseQuietAndClock(t *testing.T) {
-	if on, f, to, err := ParseQuiet("22-9"); err != nil || !on || f != 22 || to != 9 {
-		t.Errorf("22-9: %v %d %d %v", on, f, to, err)
-	}
-	if on, _, _, err := ParseQuiet("off"); err != nil || on {
-		t.Errorf("off: %v %v", on, err)
-	}
-	for _, bad := range []string{"9", "25-3", "5-5", "a-b", "-1-3"} {
-		if _, _, _, err := ParseQuiet(bad); err == nil {
-			t.Errorf("ParseQuiet(%q) должен давать ошибку", bad)
-		}
-	}
+func TestParseClock(t *testing.T) {
 	if on, h, m, err := ParseClock("03:30"); err != nil || !on || h != 3 || m != 30 {
 		t.Errorf("03:30: %v %d %d %v", on, h, m, err)
+	}
+	if on, _, _, err := ParseClock("off"); err != nil || on {
+		t.Errorf("off: %v %v", on, err)
 	}
 	for _, bad := range []string{"3", "24:00", "10:60", "xx:yy"} {
 		if _, _, _, err := ParseClock(bad); err == nil {

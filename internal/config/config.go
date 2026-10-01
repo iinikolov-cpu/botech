@@ -25,7 +25,24 @@ type Config struct {
 
 	// PromoMaxUses: сколько раз можно использовать каждый промокод (переменная PROMO_LOW_THRESHOLD).
 	PromoMaxUses int
+
+	// Напоминания покупателям. Интервалы в минутах от момента события: отправки задания (принятие),
+	// принятия задания и возврата отчёта на доработку (отчёт). Пустой список отключает напоминания.
+	RemindAcceptMinutes []int
+	RemindReportMinutes []int
+	// Тихие часы: в это время напоминания не отправляются, а переносятся на утро.
+	QuietOn   bool
+	QuietFrom int
+	QuietTo   int
+	// StaleMinutes: через сколько минут ожидания в списке заданий появляется отметка «давно без ответа».
+	StaleMinutes int
 }
+
+// Пределы для интервалов напоминаний: защита от опечаток.
+const (
+	MaxRemindMinutes = 43200 // 30 суток
+	MaxRemindCount   = 5
+)
 
 // Load читает и проверяет переменные окружения.
 func Load() (*Config, error) {
@@ -70,7 +87,69 @@ func Load() (*Config, error) {
 		}
 		c.PromoMaxUses = n
 	}
+
+	var perr error
+	if c.RemindAcceptMinutes, perr = ParseMinutes(getenv("REMIND_ACCEPT_MINUTES", "1440,2880")); perr != nil {
+		return nil, fmt.Errorf("REMIND_ACCEPT_MINUTES: %w", perr)
+	}
+	if c.RemindReportMinutes, perr = ParseMinutes(getenv("REMIND_REPORT_MINUTES", "1440,2880")); perr != nil {
+		return nil, fmt.Errorf("REMIND_REPORT_MINUTES: %w", perr)
+	}
+	if c.QuietOn, c.QuietFrom, c.QuietTo, perr = ParseQuiet(getenv("REMIND_QUIET_HOURS", "22-9")); perr != nil {
+		return nil, fmt.Errorf("REMIND_QUIET_HOURS: %w", perr)
+	}
+	c.StaleMinutes = 1440
+	if v := strings.TrimSpace(os.Getenv("STALE_MINUTES")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return nil, errors.New("STALE_MINUTES должна быть числом минут от 1")
+		}
+		c.StaleMinutes = n
+	}
 	return c, nil
+}
+
+// ParseMinutes разбирает список минут "1440,2880" (строго по возрастанию). "off" или пустое значение
+// отключает напоминания.
+func ParseMinutes(s string) ([]int, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || s == "off" || s == "-" || s == "0" {
+		return nil, nil
+	}
+	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' || r == ' ' })
+	if len(fields) > MaxRemindCount {
+		return nil, fmt.Errorf("не больше %d напоминаний", MaxRemindCount)
+	}
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil || n < 1 || n > MaxRemindMinutes {
+			return nil, fmt.Errorf("%q: нужно целое число минут от 1 до %d", f, MaxRemindMinutes)
+		}
+		if len(out) > 0 && n <= out[len(out)-1] {
+			return nil, errors.New("минуты должны идти по возрастанию, например 1440,2880")
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// ParseQuiet разбирает тихие часы "22-9" (с 22:00 до 09:00) или "off".
+func ParseQuiet(s string) (on bool, from, to int, err error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || s == "off" || s == "-" {
+		return false, 0, 0, nil
+	}
+	a, b, ok := strings.Cut(s, "-")
+	if !ok {
+		return false, 0, 0, errors.New("формат: 22-9 (с какого часа по какой) или off")
+	}
+	from, e1 := strconv.Atoi(strings.TrimSpace(a))
+	to, e2 := strconv.Atoi(strings.TrimSpace(b))
+	if e1 != nil || e2 != nil || from < 0 || from > 23 || to < 0 || to > 23 || from == to {
+		return false, 0, 0, errors.New("часы от 0 до 23, начало и конец должны различаться, например 22-9")
+	}
+	return true, from, to, nil
 }
 
 func getenv(key, def string) string {

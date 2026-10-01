@@ -47,6 +47,8 @@ type App struct {
 	loc         *time.Location
 	botUsername string
 
+	panels *panelStore // «живое» меню каждого пользователя (см. panel.go)
+
 	badInvites *limiter // неудачные попытки ввода кода незнакомцами
 	noAccess   *limiter // ответы «нет доступа» (чтобы не спамить в ответ на спам)
 }
@@ -56,6 +58,7 @@ func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
 		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, backupChat: svc.BackupChatID, log: log, loc: loc,
+		panels:     newPanelStore(),
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}
@@ -95,26 +98,31 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 		}
 	case promoAddDialog:
 		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
 			a.importPromos(ctx, b, u, m.Text)
 			return
 		}
 	case settingDialog:
 		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
 			a.onSettingValue(ctx, b, u, m.Text)
 			return
 		}
 	case reworkDialog:
 		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
 			a.onReworkComment(ctx, b, u, m.Text)
 			return
 		}
 	case compRejectDialog:
 		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
 			a.onCompRejectComment(ctx, b, u, m.Text)
 			return
 		}
 	case promoDelDialog:
 		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
 			a.deletePromos(ctx, b, u, m.Text)
 			return
 		}
@@ -258,7 +266,8 @@ func (a *App) onStart(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	if u.IsAdmin() {
 		text += i18n.T(lang(u), "help_admin")
 	}
-	a.send(ctx, b, u.TgID, text, kb(row(btn(i18n.T(lang(u), "btn_tasks"), "tsk:l"))))
+	a.eat(ctx, b, upd.Message)
+	a.sendPanel(ctx, b, u.TgID, text, kb(row(btn(i18n.T(lang(u), "btn_tasks"), "tsk:l"))))
 }
 
 func (a *App) onHelp(ctx context.Context, b *bot.Bot, upd *models.Update) {
@@ -270,7 +279,8 @@ func (a *App) onHelp(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	if u.IsAdmin() {
 		text += i18n.T(lang(u), "help_admin")
 	}
-	a.send(ctx, b, u.TgID, text, nil)
+	a.eat(ctx, b, upd.Message)
+	a.sendPanel(ctx, b, u.TgID, text, nil)
 }
 
 // adminOnly пропускает только активных админов.

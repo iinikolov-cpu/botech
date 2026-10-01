@@ -160,7 +160,7 @@ func (a *App) importPromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	back := kb(row(btn("🎁 К промокодам", "adm:pr")))
 	res, err := a.promos.Add(ctx, admin.TgID, raw)
 	if err != nil {
-		a.send(ctx, b, admin.TgID, "❌ "+esc(errText(err)), back)
+		a.sendPanel(ctx, b, admin.TgID, "❌ "+esc(errText(err)), back)
 		return
 	}
 	_ = a.dialog.Clear(ctx, admin.TgID)
@@ -180,7 +180,7 @@ func (a *App) importPromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	if res.Added == 0 && res.Duplicates == 0 && len(res.Invalid) == 0 {
 		sb.WriteString("Кодов не найдено. Пришлите по одному коду в строке.\n")
 	}
-	a.send(ctx, b, admin.TgID, sb.String(), back)
+	a.sendPanel(ctx, b, admin.TgID, sb.String(), back)
 }
 
 // deletePromos удаляет свободные коды из присланного списка и отвечает итогом.
@@ -189,7 +189,7 @@ func (a *App) deletePromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	res, err := a.promos.DeleteFree(ctx, admin.TgID, raw)
 	if err != nil {
 		a.log.Error("удаление промокодов по списку", "err", err)
-		a.send(ctx, b, admin.TgID, "Не удалось удалить, подробности в логах.", back)
+		a.sendPanel(ctx, b, admin.TgID, "Не удалось удалить, подробности в логах.", back)
 		return
 	}
 	_ = a.dialog.Clear(ctx, admin.TgID)
@@ -201,20 +201,20 @@ func (a *App) deletePromos(ctx context.Context, b *bot.Bot, admin *domain.User, 
 	if len(res.Invalid) > 0 {
 		text += fmt.Sprintf("Не похоже на код: %d\n", len(res.Invalid))
 	}
-	a.send(ctx, b, admin.TgID, text, back)
+	a.sendPanel(ctx, b, admin.TgID, text, back)
 }
 
 // onPromoFile принимает файл .csv или .txt с промокодами.
 func (a *App) onPromoFile(ctx context.Context, b *bot.Bot, admin *domain.User, doc *models.Document) {
 	back := kb(row(btn("🎁 К промокодам", "adm:pr")))
 	if doc.FileSize > maxPromoFile {
-		a.send(ctx, b, admin.TgID, fmt.Sprintf("Файл слишком большой (максимум %d КБ).", maxPromoFile/1024), back)
+		a.sendPanel(ctx, b, admin.TgID, fmt.Sprintf("Файл слишком большой (максимум %d КБ).", maxPromoFile/1024), back)
 		return
 	}
 	data, err := a.download(ctx, b, doc.FileID, maxPromoFile)
 	if err != nil {
 		a.log.Error("скачивание файла промокодов", "err", err)
-		a.send(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
+		a.sendPanel(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
 		return
 	}
 	if state, _ := a.dialog.Get(ctx, admin.TgID, nil); state == promoDelDialog {
@@ -226,12 +226,22 @@ func (a *App) onPromoFile(ctx context.Context, b *bot.Bot, admin *domain.User, d
 
 // notifyAdmins рассылает текст всем активным админам.
 func (a *App) notifyAdmins(ctx context.Context, b *bot.Bot, text string, markup *models.InlineKeyboardMarkup) {
+	a.notifyAdminsKeyed(ctx, b, "", text, markup)
+}
+
+// notifyAdminsKeyed то же, но с ключом: новое уведомление с тем же ключом заменяет прежнее
+// (например, предупреждение о промокодах не дублируется). Пустой ключ: обычная рассылка.
+func (a *App) notifyAdminsKeyed(ctx context.Context, b *bot.Bot, key, text string, markup *models.InlineKeyboardMarkup) {
 	admins, err := a.access.ActiveAdmins(ctx)
 	if err != nil {
 		a.log.Error("не удалось получить админов", "err", err)
 		return
 	}
 	for _, ad := range admins {
-		a.send(ctx, b, ad.TgID, text, markup)
+		if key == "" {
+			a.send(ctx, b, ad.TgID, text, markup)
+		} else {
+			a.sendKeyed(ctx, b, ad.TgID, key, text, markup)
+		}
 	}
 }

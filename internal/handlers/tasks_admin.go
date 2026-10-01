@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"botech/internal/domain"
+	"botech/internal/service"
 	"botech/internal/storage"
 )
 
@@ -105,6 +107,37 @@ func (a *App) taskAdminCallback(ctx context.Context, b *bot.Bot, admin *domain.U
 	return t, m, ""
 }
 
+// waitNote отметка для списка заданий: что покупатель слишком долго не реагирует. Пусто, если всё в порядке.
+// Порог задаётся в конфиге (STALE_MINUTES, по умолчанию сутки).
+func (a *App) waitNote(c *service.TaskCard) string {
+	stale := a.reminders.Stale()
+	since := func(t time.Time) (time.Duration, bool) {
+		if t.IsZero() {
+			return 0, false
+		}
+		d := time.Since(t)
+		return d, d > stale
+	}
+	switch c.Task.Status {
+	case domain.TaskSent:
+		if d, ok := since(c.Task.SentAt); ok {
+			return "нет ответа " + humanDuration(d)
+		}
+	case domain.TaskExpired:
+		if !c.Task.DueAt.IsZero() {
+			return "просрочено на " + humanDuration(time.Since(c.Task.DueAt))
+		}
+		return "просрочено"
+	case domain.TaskRework:
+		if c.Report != nil {
+			if d, ok := since(c.Report.DecidedAt); ok {
+				return "на доработке " + humanDuration(d)
+			}
+		}
+	}
+	return ""
+}
+
 func (a *App) screenTasks(ctx context.Context, filter string, page int) (string, *models.InlineKeyboardMarkup) {
 	f, ok := taskFilters[filter]
 	if !ok {
@@ -130,8 +163,17 @@ func (a *App) screenTasks(ctx context.Context, filter string, page int) (string,
 		if name == "" {
 			name = itoa(c.User.TgID)
 		}
-		label := fmt.Sprintf("#%d %s · %s · %s", c.Task.ID, c.Version.Body.Title, name, c.Task.Status.Title())
-		rows = append(rows, row(btn(cut(label, 60), "adm:tc:"+itoa(c.Task.ID))))
+		state, flag := c.Task.Status.Title(), ""
+		if w := a.waitNote(c); w != "" {
+			state, flag = w, "⚠ "
+		}
+		head := fmt.Sprintf("%s#%d ", flag, c.Task.ID)
+		tail := " · " + name + " · " + state
+		room := 60 - len([]rune(head)) - len([]rune(tail))
+		if room < 8 {
+			room = 8
+		}
+		rows = append(rows, row(btn(head+cut(c.Version.Body.Title, room)+tail, "adm:tc:"+itoa(c.Task.ID))))
 	}
 	var nav []models.InlineKeyboardButton
 	if page > 0 {
@@ -162,6 +204,9 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	fmt.Fprintf(&sb, "Сценарий: %s (%s), версия %d\n", esc(body.Title), esc(body.Operator), c.Version.Version)
 	fmt.Fprintf(&sb, "Покупатель: %s\n", userLabel(c.User))
 	fmt.Fprintf(&sb, "Статус: <b>%s</b>\n", t.Status.Title())
+	if w := a.waitNote(c); w != "" {
+		fmt.Fprintf(&sb, "⚠ %s\n", w)
+	}
 	fmt.Fprintf(&sb, "Срок: %d дн. после принятия", t.DueDays)
 	if !t.DueAt.IsZero() {
 		fmt.Fprintf(&sb, " (до %s)", a.fmtTime(t.DueAt))

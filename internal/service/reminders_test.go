@@ -39,7 +39,17 @@ func (e *env) settingsSvc(c *clock) *Settings {
 
 // newReminders создаёт «процесс» планировщика; повторный вызов имитирует перезапуск бота.
 func (e *env) newReminders(c *clock) *Reminders {
-	r := NewReminders(e.store, e.tasks, e.settingsSvc(c), uzt)
+	return e.newRemindersCfg(c, defaultRemindCfg())
+}
+
+// defaultRemindCfg: напоминания через 24 и 48 часов, тихие часы 22-9.
+func defaultRemindCfg() RemindConfig {
+	d := MinutesToDurations([]int{1440, 2880})
+	return RemindConfig{Accept: d, Report: d, QuietOn: true, QuietFrom: 22, QuietTo: 9, Stale: 24 * time.Hour}
+}
+
+func (e *env) newRemindersCfg(c *clock, cfg RemindConfig) *Reminders {
+	r := NewReminders(e.store, e.tasks, cfg, uzt)
 	r.now = c.Now
 	return r
 }
@@ -103,12 +113,7 @@ func TestTickAcceptReminders(t *testing.T) {
 	if n[0].Seq != 2 {
 		t.Fatalf("второе напоминание: %+v", n[0])
 	}
-	step(71 * time.Hour)
-	n = step(72*time.Hour, NoticeEscalation) // через сутки после последнего
-	if n[0].Sent != 2 || n[0].Total != 2 {
-		t.Fatalf("эскалация: %+v", n[0])
-	}
-	step(72 * time.Hour)
+	step(72 * time.Hour)  // эскалации админу нет
 	step(200 * time.Hour) // больше ничего
 
 	// Всё зафиксировано в истории задания.
@@ -117,7 +122,7 @@ func TestTickAcceptReminders(t *testing.T) {
 	for _, ev := range events {
 		count[ev.Kind]++
 	}
-	if count["reminder"] != 2 || count["escalation"] != 1 {
+	if count["reminder"] != 2 || count["escalation"] != 0 {
 		t.Fatalf("история: %v", count)
 	}
 }
@@ -138,12 +143,6 @@ func TestTickCatchUpSendsOnlyLatest(t *testing.T) {
 	}
 	if got := tick(t, rem); len(got) != 0 {
 		t.Fatalf("пропущенное первое не должно отправляться потом: %v", kinds(got))
-	}
-	// Эскалация считается от последнего интервала (48 ч + 24 ч), счётчик реально отправленных равен 1.
-	c.Set(t0.Add(72 * time.Hour))
-	got = tick(t, rem)
-	if len(got) != 1 || got[0].Kind != NoticeEscalation || got[0].Sent != 1 {
-		t.Fatalf("эскалация после пропуска: %+v", got)
 	}
 }
 
@@ -166,15 +165,12 @@ func TestTickSurvivesRestart(t *testing.T) {
 }
 
 func TestTickQuietHours(t *testing.T) {
-	ctx := context.Background()
 	e := newEnv(t)
 	c := &clock{t: t0}
 	e.useClock(c)
-	rem := e.newReminders(c)
-	set := e.settingsSvc(c)
-	if _, err := set.Set(ctx, firstAdmin, KeyRemindAccept, "13"); err != nil { // через 13 ч = 23:00 по Ташкенту
-		t.Fatal(err)
-	}
+	cfg := defaultRemindCfg()
+	cfg.Accept = MinutesToDurations([]int{13 * 60}) // через 13 ч = 23:00 по Ташкенту
+	rem := e.newRemindersCfg(c, cfg)
 	sc := e.importScenario(t, scenarioYAML).Scenario
 	e.assignOne(t, sc.ID, 1)
 
@@ -192,9 +188,8 @@ func TestTickQuietHours(t *testing.T) {
 		t.Fatalf("утром отложенное напоминание уходит: %v", kinds(got))
 	}
 	// Тихие часы можно выключить.
-	if _, err := set.Set(ctx, firstAdmin, KeyQuiet, "off"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.QuietOn = false
+	rem = e.newRemindersCfg(c, cfg)
 	e2 := e.assignOne(t, sc.ID, 2)
 	_ = e2
 	c.Set(t0.Add(23*time.Hour + 13*time.Hour)) // 22:00 того же дня + 13 ч от новой отправки
@@ -291,39 +286,34 @@ func TestTickRework(t *testing.T) {
 	}
 }
 
-func TestTickSettings(t *testing.T) {
+// Интервалы задаются конфигом в минутах; пустой список отключает напоминания, но не просрочку.
+func TestTickConfigMinutes(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	c := &clock{t: t0}
 	e.useClock(c)
-	rem := e.newReminders(c)
-	set := e.settingsSvc(c)
+	cfg := defaultRemindCfg()
+	cfg.QuietOn = false
+	cfg.Accept = MinutesToDurations([]int{5, 10})
+	rem := e.newRemindersCfg(c, cfg)
 	sc := e.importScenario(t, scenarioYAML).Scenario
 	e.assignOne(t, sc.ID, 1)
 
-	// Свои интервалы: 1 и 2 часа, эскалация через 1 час.
-	if _, err := set.Set(ctx, firstAdmin, KeyRemindAccept, "1,2"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := set.Set(ctx, firstAdmin, KeyEscalate, "1"); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		after time.Duration
-		want  NoticeKind
-	}{{time.Hour, NoticeReminder}, {2 * time.Hour, NoticeReminder}, {3 * time.Hour, NoticeEscalation}} {
+		want  int
+	}{{4 * time.Minute, 0}, {5 * time.Minute, 1}, {9 * time.Minute, 0}, {10 * time.Minute, 1}, {time.Hour, 0}} {
 		c.Set(t0.Add(tc.after))
-		if got := tick(t, rem); len(got) != 1 || got[0].Kind != tc.want {
-			t.Fatalf("через %v: %v, ожидали %s", tc.after, kinds(got), tc.want)
+		if got := tick(t, rem); len(got) != tc.want {
+			t.Fatalf("через %v: %v, ожидали %d напоминаний", tc.after, kinds(got), tc.want)
 		}
 	}
 
-	// Выключение напоминаний; просрочка при этом продолжает работать.
+	// Напоминания выключены (пустые списки); просрочка при этом продолжает работать.
+	cfg.Accept, cfg.Report = nil, nil
+	rem = e.newRemindersCfg(c, cfg)
 	id2 := e.assignOne(t, sc.ID, 2)
 	if _, _, err := e.tasks.Accept(ctx, 2, id2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := set.Set(ctx, firstAdmin, KeyRemindEnabled, "0"); err != nil {
 		t.Fatal(err)
 	}
 	c.Set(t0.Add(100 * time.Hour))
@@ -331,38 +321,28 @@ func TestTickSettings(t *testing.T) {
 	if len(got) != 1 || got[0].Kind != NoticeExpired {
 		t.Fatalf("при выключенных напоминаниях просрочка должна работать: %v", kinds(got))
 	}
+	if rem.Stale() != 24*time.Hour {
+		t.Fatalf("порог «давно без ответа»: %v", rem.Stale())
+	}
 }
 
 func TestSettingsValidation(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	set := NewSettings(e.store)
-	bad := []struct{ key, val string }{
-		{KeyRemindAccept, "48,24"}, {KeyRemindReport, "abc"}, {KeyEscalate, "0"}, {KeyEscalate, "999"},
-		{KeyQuiet, "25-3"}, {KeyBackupTime, "99:99"}, {"unknown", "1"},
-	}
-	for _, b := range bad {
+	// Настройки напоминаний из бота убраны: они задаются конфигом.
+	for _, b := range []struct{ key, val string }{
+		{KeyBackupTime, "99:99"}, {"remind_accept_hours", "24"}, {"escalate_hours", "24"}, {"unknown", "1"},
+	} {
 		if _, err := set.Set(ctx, firstAdmin, b.key, b.val); !errors.Is(err, ErrForbidden) {
 			t.Errorf("Set(%s, %q): ожидали ErrForbidden, получили %v", b.key, b.val, err)
 		}
-	}
-	// Значения по умолчанию и нормализация.
-	cfg, _ := set.Reminders(ctx)
-	if !cfg.Enabled || len(cfg.Accept) != 2 || cfg.Accept[0] != 24 || cfg.EscalateHours != 24 || !cfg.QuietOn || cfg.QuietFrom != 22 || cfg.QuietTo != 9 {
-		t.Fatalf("по умолчанию: %+v", cfg)
 	}
 	if v, err := set.Set(ctx, firstAdmin, KeyBackupTime, " 3:05 "); err != nil || v != "03:05" {
 		t.Fatalf("нормализация времени: %q %v", v, err)
 	}
 	if b, _ := set.Backup(ctx); !b.Enabled || b.Hour != 3 || b.Minute != 5 {
 		t.Fatalf("расписание бэкапа: %+v", b)
-	}
-	// Испорченное значение в БД не ломает планировщик: действует значение по умолчанию.
-	if err := set.SetInternal(ctx, KeyRemindAccept, "мусор"); err != nil {
-		t.Fatal(err)
-	}
-	if cfg, _ := set.Reminders(ctx); len(cfg.Accept) != 2 {
-		t.Fatalf("замена испорченного значения: %+v", cfg)
 	}
 }
 

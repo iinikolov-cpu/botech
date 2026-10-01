@@ -175,18 +175,18 @@ func (a *App) ask(ctx context.Context, b *bot.Bot, u *domain.User, st *reportSta
 			text += i18n.T(l, "rpt_optional")
 		}
 		rows = append(rows, nav(st.Idx > 0, !q.Required))
-		a.send(ctx, b, u.TgID, text, kb(rows...))
+		a.sendPanel(ctx, b, u.TgID, text, kb(rows...))
 	case phaseCompAsk:
-		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_comp_ask"), kb(
+		a.sendPanel(ctx, b, u.TgID, i18n.T(l, "rpt_comp_ask"), kb(
 			row(btn(i18n.T(l, "btn_comp_yes"), cb("ca", "1")), btn(i18n.T(l, "btn_comp_no"), cb("ca", "0"))),
 			nav(true, false)))
 	case phaseCompAmount:
-		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_amount_ask"), kb(nav(!st.CompOnly, false)))
+		a.sendPanel(ctx, b, u.TgID, i18n.T(l, "rpt_amount_ask"), kb(nav(!st.CompOnly, false)))
 	case phaseCompReceipt:
-		a.send(ctx, b, u.TgID, i18n.T(l, "rpt_receipt_ask"), kb(nav(true, false)))
+		a.sendPanel(ctx, b, u.TgID, i18n.T(l, "rpt_receipt_ask"), kb(nav(true, false)))
 	case phaseConfirm:
 		if st.CompOnly {
-			a.send(ctx, b, u.TgID, i18n.T(l, "comp_fix_confirm", fmtMoney(st.Amount)), kb(
+			a.sendPanel(ctx, b, u.TgID, i18n.T(l, "comp_fix_confirm", fmtMoney(st.Amount)), kb(
 				row(btn(i18n.T(l, "btn_send_fix"), cb("ok"))), nav(true, false)))
 			break
 		}
@@ -194,7 +194,7 @@ func (a *App) ask(ctx context.Context, b *bot.Bot, u *domain.User, st *reportSta
 		if st.KeepComp && !st.WantComp {
 			rows = append(rows, row(btn(i18n.T(l, "btn_change_comp"), cb("cc"))))
 		}
-		a.send(ctx, b, u.TgID, a.reportSummary(l, qs, st), kb(append(rows, nav(true, false))...))
+		a.sendPanel(ctx, b, u.TgID, a.reportSummary(l, qs, st), kb(append(rows, nav(true, false))...))
 	}
 }
 
@@ -505,7 +505,7 @@ func (a *App) submitReport(ctx context.Context, b *bot.Bot, u *domain.User, st *
 	if res.Late {
 		text += i18n.T(l, "rpt_sent_late")
 	}
-	a.send(ctx, b, u.TgID, text, kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
+	a.sendPanel(ctx, b, u.TgID, text, kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
 	a.log.Info("отчёт получен", "user", maskID(u.TgID), "task", st.TaskID, "late", res.Late)
 
 	msg := fmt.Sprintf("📝 Получен отчёт от %s по заданию #%d «%s»", userLabel(u), st.TaskID, esc(res.Card.Version.Body.Title))
@@ -520,7 +520,7 @@ func (a *App) submitReport(ctx context.Context, b *bot.Bot, u *domain.User, st *
 	}
 	a.notifyAdmins(ctx, b, msg, kb(row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(st.TaskID)))))
 	if res.PoolExhausted {
-		a.notifyAdmins(ctx, b, "⚠ Не осталось ни одного промокода со свободными использованиями. Загрузите новые коды.", kb(row(btn("🎁 Промокоды", "adm:pr"))))
+		a.notifyAdminsKeyed(ctx, b, "promo_warn", "⚠ Не осталось ни одного промокода со свободными использованиями. Загрузите новые коды.", kb(row(btn("🎁 Промокоды", "adm:pr"))))
 	}
 }
 
@@ -592,7 +592,7 @@ func (a *App) submitCompFix(ctx context.Context, b *bot.Bot, u *domain.User, st 
 		return
 	}
 	_ = a.dialog.Clear(ctx, u.TgID)
-	a.send(ctx, b, u.TgID, i18n.T(l, "comp_fix_sent"), kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
+	a.sendPanel(ctx, b, u.TgID, i18n.T(l, "comp_fix_sent"), kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
 	a.log.Info("компенсация исправлена", "user", maskID(u.TgID), "task", st.TaskID)
 
 	card, err := a.tasks.Card(ctx, st.TaskID)

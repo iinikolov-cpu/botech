@@ -120,6 +120,7 @@ func (a *App) screenScenario(ctx context.Context, id int64) (string, *models.Inl
 func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	admin := userFrom(ctx)
 	doc := upd.Message.Document
+	defer a.eat(ctx, b, upd.Message) // файл после обработки в чате не нужен
 	back := kb(row(btn("📋 К сценариям", "adm:sc")))
 
 	ext := strings.ToLower(filepath.Ext(doc.FileName))
@@ -128,24 +129,24 @@ func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 		return
 	}
 	if ext != ".yaml" && ext != ".yml" && ext != ".json" {
-		a.send(ctx, b, admin.TgID, "Принимаю файлы сценариев (.yaml, .yml, .json) и списки промокодов (.csv, .txt).", back)
+		a.sendPanel(ctx, b, admin.TgID, "Принимаю файлы сценариев (.yaml, .yml, .json) и списки промокодов (.csv, .txt).", back)
 		return
 	}
 	if doc.FileSize > scenario.MaxFileSize {
-		a.send(ctx, b, admin.TgID, fmt.Sprintf("Файл слишком большой (максимум %d КБ).", scenario.MaxFileSize/1024), back)
+		a.sendPanel(ctx, b, admin.TgID, fmt.Sprintf("Файл слишком большой (максимум %d КБ).", scenario.MaxFileSize/1024), back)
 		return
 	}
 	data, err := a.download(ctx, b, doc.FileID, scenario.MaxFileSize)
 	if err != nil {
 		a.log.Error("скачивание файла сценария", "err", err)
-		a.send(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
+		a.sendPanel(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
 		return
 	}
 
 	res, problems, err := a.scenarios.Import(ctx, admin.TgID, data)
 	if err != nil {
 		a.log.Error("импорт сценария", "err", err)
-		a.send(ctx, b, admin.TgID, "Не удалось сохранить сценарий, подробности в логах.", back)
+		a.sendPanel(ctx, b, admin.TgID, "Не удалось сохранить сценарий, подробности в логах.", back)
 		return
 	}
 	if len(problems) > 0 {
@@ -157,7 +158,7 @@ func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 		for _, p := range problems {
 			sb.WriteString("• " + esc(p) + "\n")
 		}
-		a.send(ctx, b, admin.TgID, sb.String(), back)
+		a.sendPanel(ctx, b, admin.TgID, sb.String(), back)
 		return
 	}
 
@@ -175,7 +176,7 @@ func (a *App) onDocument(ctx context.Context, b *bot.Bot, upd *models.Update) {
 		msg += "\nСценарий возвращён из архива."
 	}
 	a.log.Info("сценарий загружен", "admin", maskID(admin.TgID), "key", res.Scenario.Key, "version", res.Version.Version)
-	a.send(ctx, b, admin.TgID, msg, kb(row(btn("👁 Открыть", "adm:scv:"+itoa(res.Scenario.ID))), row(btn("📋 К сценариям", "adm:sc"))))
+	a.sendPanel(ctx, b, admin.TgID, msg, kb(row(btn("👁 Открыть", "adm:scv:"+itoa(res.Scenario.ID))), row(btn("📋 К сценариям", "adm:sc"))))
 }
 
 // download скачивает файл, загруженный в Telegram (читает не больше limit байт).

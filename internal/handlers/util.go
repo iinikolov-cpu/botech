@@ -72,6 +72,12 @@ func (a *App) send(ctx context.Context, b *bot.Bot, chatID int64, text string, m
 
 // trySend отправляет HTML-сообщение и возвращает ошибку (нужно там, где важен факт доставки).
 func (a *App) trySend(ctx context.Context, b *bot.Bot, chatID int64, text string, markup *models.InlineKeyboardMarkup) error {
+	_, err := a.sendMsg(ctx, b, chatID, text, markup)
+	return err
+}
+
+// sendMsg отправляет HTML-сообщение и возвращает его (нужен message_id для панелей).
+func (a *App) sendMsg(ctx context.Context, b *bot.Bot, chatID int64, text string, markup *models.InlineKeyboardMarkup) (*models.Message, error) {
 	p := &bot.SendMessageParams{
 		ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML,
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
@@ -79,17 +85,17 @@ func (a *App) trySend(ctx context.Context, b *bot.Bot, chatID int64, text string
 	if markup != nil {
 		p.ReplyMarkup = markup
 	}
-	_, err := b.SendMessage(ctx, p)
-	return err
+	return b.SendMessage(ctx, p)
 }
 
 // edit заменяет текст сообщения с кнопкой (для навигации по меню).
 func (a *App) edit(ctx context.Context, b *bot.Bot, cb *models.CallbackQuery, text string, markup *models.InlineKeyboardMarkup) {
 	msg := cb.Message.Message
 	if msg == nil {
-		a.send(ctx, b, cb.From.ID, text, markup)
+		a.sendPanel(ctx, b, cb.From.ID, text, markup)
 		return
 	}
+	a.adopt(ctx, b, msg.Chat.ID, msg.ID)
 	var err error
 	if msg.Photo != nil || msg.Video != nil || msg.Document != nil {
 		// У сообщений с медиа меняется подпись, а не текст.
@@ -174,16 +180,23 @@ type mediaItem struct {
 
 // sendMedia отправляет фото и видео компактно: альбомами по 10 штук (одиночный файл обычным
 // сообщением). Вызывать нужно ДО сообщения с кнопками, чтобы кнопки оказались в самом низу.
-func (a *App) sendMedia(ctx context.Context, b *bot.Bot, chatID int64, items []mediaItem) {
+// Возвращает id отправленных сообщений: их можно убрать вместе с панелью (см. sendPanel).
+func (a *App) sendMedia(ctx context.Context, b *bot.Bot, chatID int64, items []mediaItem) []int {
+	var ids []int
 	single := func(m mediaItem) {
-		var err error
+		var (
+			msg *models.Message
+			err error
+		)
 		if m.Video {
-			_, err = b.SendVideo(ctx, &bot.SendVideoParams{ChatID: chatID, Video: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
+			msg, err = b.SendVideo(ctx, &bot.SendVideoParams{ChatID: chatID, Video: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
 		} else {
-			_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{ChatID: chatID, Photo: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
+			msg, err = b.SendPhoto(ctx, &bot.SendPhotoParams{ChatID: chatID, Photo: &models.InputFileString{Data: m.FileID}, Caption: m.Caption})
 		}
 		if err != nil {
 			a.log.Warn("не удалось отправить медиа", "err", err)
+		} else if msg != nil {
+			ids = append(ids, msg.ID)
 		}
 	}
 	for len(items) > 0 {
@@ -205,11 +218,17 @@ func (a *App) sendMedia(ctx context.Context, b *bot.Bot, chatID int64, items []m
 				group = append(group, &models.InputMediaPhoto{Media: m.FileID, Caption: m.Caption})
 			}
 		}
-		if _, err := b.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: group}); err != nil {
+		msgs, err := b.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: group})
+		if err != nil {
 			a.log.Warn("альбом не отправился, отправляю по одному", "err", err)
 			for _, m := range chunk {
 				single(m)
 			}
+			continue
+		}
+		for _, m := range msgs {
+			ids = append(ids, m.ID)
 		}
 	}
+	return ids
 }

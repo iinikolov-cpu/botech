@@ -215,17 +215,20 @@ func (a *App) compCard(ctx context.Context, id int64) (string, *models.InlineKey
 func (a *App) openComp(ctx context.Context, b *bot.Bot, admin *domain.User, id int64) {
 	cc, err := a.reports.CompCardByID(ctx, id)
 	if err != nil {
-		a.send(ctx, b, admin.TgID, "Запись не найдена.", kb(row(btn("« К компенсациям", "adm:cp:w:0"))))
+		a.sendPanel(ctx, b, admin.TgID, "Запись не найдена.", kb(row(btn("« К компенсациям", "adm:cp:w:0"))))
 		return
 	}
 	text, markup := a.compCard(ctx, id)
-	_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
+	msg, err := b.SendPhoto(ctx, &bot.SendPhotoParams{
 		ChatID: admin.TgID, Photo: &models.InputFileString{Data: cc.Comp.ReceiptFileID},
 		Caption: cut(text, 1000), ParseMode: models.ParseModeHTML, ReplyMarkup: markup,
 	})
+	if err == nil && msg != nil {
+		a.deleteMsgs(ctx, b, admin.TgID, a.panels.swap(admin.TgID, msg.ID, nil))
+	}
 	if err != nil { // чек не открылся: показываем данные текстом, чтобы действия остались доступны
 		a.log.Warn("не удалось отправить фото чека", "err", err)
-		a.send(ctx, b, admin.TgID, text+"\n⚠ Фото чека не удалось загрузить.", markup)
+		a.sendPanel(ctx, b, admin.TgID, text+"\n⚠ Фото чека не удалось загрузить.", markup)
 	}
 }
 
@@ -233,7 +236,7 @@ func (a *App) openComp(ctx context.Context, b *bot.Bot, admin *domain.User, id i
 func (a *App) openReport(ctx context.Context, b *bot.Bot, admin *domain.User, taskID int64) {
 	card, err := a.tasks.Card(ctx, taskID)
 	if err != nil || card.Report == nil {
-		a.send(ctx, b, admin.TgID, "Отчёта по этому заданию пока нет.", kb(row(btn("« К заданию", "adm:tc:"+itoa(taskID)))))
+		a.sendPanel(ctx, b, admin.TgID, "Отчёта по этому заданию пока нет.", kb(row(btn("« К заданию", "adm:tc:"+itoa(taskID)))))
 		return
 	}
 	qText := map[string]string{}
@@ -246,9 +249,9 @@ func (a *App) openReport(ctx context.Context, b *bot.Bot, admin *domain.User, ta
 			media = append(media, mediaItem{Video: an.Type == domain.QVideo, FileID: an.FileID, Caption: qText[an.Key]})
 		}
 	}
-	a.sendMedia(ctx, b, admin.TgID, media)
+	album := a.sendMedia(ctx, b, admin.TgID, media)
 	text, markup := a.reportText(ctx, taskID)
-	a.send(ctx, b, admin.TgID, text, markup)
+	a.sendPanel(ctx, b, admin.TgID, text, markup, album...)
 }
 
 // reportText ответы отчёта и кнопки решения (без медиа, поэтому подходит и для перерисовки на месте).
@@ -308,16 +311,16 @@ func (a *App) onReworkComment(ctx context.Context, b *bot.Bot, admin *domain.Use
 	card, changed, err := a.reports.ReturnForRework(ctx, admin.TgID, st.ID, text)
 	switch {
 	case err != nil:
-		a.send(ctx, b, admin.TgID, "❌ "+esc(errText(err))+"\nНапишите комментарий ещё раз или нажмите «Отмена» выше.", nil)
+		a.sendKeyed(ctx, b, admin.TgID, "err", "❌ "+esc(errText(err))+"\nНапишите комментарий ещё раз или нажмите «Отмена» выше.", nil)
 		return
 	case !changed:
 		_ = a.dialog.Clear(ctx, admin.TgID)
-		a.send(ctx, b, admin.TgID, "Вернуть на доработку можно только отчёт, ожидающий проверки. Статус уже изменился.", kb(row(btn("« К заданию", "adm:tc:"+itoa(st.ID)))))
+		a.sendPanel(ctx, b, admin.TgID, "Вернуть на доработку можно только отчёт, ожидающий проверки. Статус уже изменился.", kb(row(btn("« К заданию", "adm:tc:"+itoa(st.ID)))))
 		return
 	}
 	_ = a.dialog.Clear(ctx, admin.TgID)
 	a.log.Info("отчёт возвращён на доработку", "admin", maskID(admin.TgID), "task", st.ID)
-	a.send(ctx, b, admin.TgID, fmt.Sprintf("↩ Отчёт по заданию #%d возвращён на доработку. Покупатель получил ваш комментарий.", st.ID),
+	a.sendPanel(ctx, b, admin.TgID, fmt.Sprintf("↩ Отчёт по заданию #%d возвращён на доработку. Покупатель получил ваш комментарий.", st.ID),
 		kb(row(btn("« К заданию", "adm:tc:"+itoa(st.ID)))))
 	a.send(ctx, b, card.User.TgID,
 		i18n.T(lang(card.User), "rework_notice", esc(card.Version.Body.Title), esc(card.Report.AdminComment)),
@@ -333,16 +336,16 @@ func (a *App) onCompRejectComment(ctx context.Context, b *bot.Bot, admin *domain
 	cc, changed, err := a.reports.RejectCompensation(ctx, admin.TgID, st.ID, text)
 	switch {
 	case err != nil:
-		a.send(ctx, b, admin.TgID, "❌ "+esc(errText(err))+"\nНапишите комментарий ещё раз или нажмите «Отмена» выше.", nil)
+		a.sendKeyed(ctx, b, admin.TgID, "err", "❌ "+esc(errText(err))+"\nНапишите комментарий ещё раз или нажмите «Отмена» выше.", nil)
 		return
 	case !changed:
 		_ = a.dialog.Clear(ctx, admin.TgID)
-		a.send(ctx, b, admin.TgID, "Отклонить можно только компенсацию «к выплате». Статус уже изменился.", kb(row(btn("« К компенсациям", "adm:cp:w:0"))))
+		a.sendPanel(ctx, b, admin.TgID, "Отклонить можно только компенсацию «к выплате». Статус уже изменился.", kb(row(btn("« К компенсациям", "adm:cp:w:0"))))
 		return
 	}
 	_ = a.dialog.Clear(ctx, admin.TgID)
 	a.log.Info("компенсация отклонена", "admin", maskID(admin.TgID), "compensation", st.ID)
-	a.send(ctx, b, admin.TgID, fmt.Sprintf("✖ Компенсация по заданию #%d отклонена. Покупатель получил ваш комментарий.", cc.Comp.TaskID),
+	a.sendPanel(ctx, b, admin.TgID, fmt.Sprintf("✖ Компенсация по заданию #%d отклонена. Покупатель получил ваш комментарий.", cc.Comp.TaskID),
 		kb(row(btn("« К компенсациям", "adm:cp:r:0"))))
 	a.send(ctx, b, cc.User.TgID,
 		i18n.T(lang(cc.User), "comp_reject_notice", esc(cc.Title), esc(cc.Comp.AdminComment)),

@@ -38,34 +38,17 @@ func (a *App) deliverNotice(ctx context.Context, b *bot.Bot, n service.Notice) {
 
 	switch n.Kind {
 	case service.NoticeReminder:
-		a.sendBuyerReminder(ctx, b, c, "")
+		a.sendBuyerReminder(ctx, b, c)
 		a.log.Info("напоминание отправлено", "user", maskID(c.User.TgID), "task", c.Task.ID, "phase", n.Phase, "seq", n.Seq)
-	case service.NoticeEscalation:
-		what := map[string]string{
-			service.PhaseAccept: "не ответил на задание",
-			service.PhaseReport: "не прислал отчёт по заданию",
-			service.PhaseRework: "не исправил отчёт по заданию",
-		}[n.Phase]
-		text := fmt.Sprintf("🚨 Покупатель %s %s #%s «%s». Прошло %s, напоминаний отправлено: %d из %d.",
-			userLabel(c.User), what, id, title, humanDuration(n.Elapsed), n.Sent, n.Total)
-		a.notifyTaskAdmins(ctx, b, c.Task.CreatedBy, text, kb(row(
-			btn("Открыть задание", "adm:tc:"+id), btn("🔔 Напомнить", "adm:tp:"+id))))
-		a.log.Info("эскалация админу", "user", maskID(c.User.TgID), "task", c.Task.ID, "phase", n.Phase)
 	case service.NoticeExpired:
 		_ = a.trySend(ctx, b, c.User.TgID, i18n.T(l, "expired_buyer", title),
 			kb(row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id))))
-		text := fmt.Sprintf("⌛ Задание #%s «%s» просрочено: покупатель %s не прислал отчёт к сроку (%s).",
-			id, title, userLabel(c.User), a.fmtTime(c.Task.DueAt))
-		a.notifyTaskAdmins(ctx, b, c.Task.CreatedBy, text, kb(
-			row(btn("Открыть задание", "adm:tc:"+id), btn("🔔 Напомнить", "adm:tp:"+id)),
-			row(btn("🚫 Отменить задание", "adm:tcl:"+id))))
 		a.log.Info("задание просрочено", "user", maskID(c.User.TgID), "task", c.Task.ID)
 	}
 }
 
 // sendBuyerReminder отправляет покупателю напоминание по текущему состоянию задания.
-// prefix добавляется к тексту (для ручного напоминания от админа).
-func (a *App) sendBuyerReminder(ctx context.Context, b *bot.Bot, c *service.TaskCard, prefix string) {
+func (a *App) sendBuyerReminder(ctx context.Context, b *bot.Bot, c *service.TaskCard) {
 	l := lang(c.User)
 	title := esc(c.Version.Body.Title)
 	id := itoa(c.Task.ID)
@@ -86,23 +69,17 @@ func (a *App) sendBuyerReminder(ctx context.Context, b *bot.Bot, c *service.Task
 		text = i18n.T(l, "remind_report", title, due)
 		markup = kb(row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))
 	}
-	if err := a.trySend(ctx, b, c.User.TgID, prefix+text, markup); err != nil {
+	if err := a.trySend(ctx, b, c.User.TgID, text, markup); err != nil {
 		a.log.Warn("напоминание не доставлено", "user", maskID(c.User.TgID), "task", c.Task.ID, "err", err)
 	}
-}
-
-// notifyTaskAdmins отправляет уведомление админу, назначившему задание. Если он больше не админ, всем админам.
-func (a *App) notifyTaskAdmins(ctx context.Context, b *bot.Bot, creator int64, text string, markup *models.InlineKeyboardMarkup) {
-	if u, err := a.access.Lookup(ctx, creator); err == nil && u.IsAdmin() {
-		a.send(ctx, b, creator, text, markup)
-		return
-	}
-	a.notifyAdmins(ctx, b, text, markup)
 }
 
 // humanDuration «3 дн. 2 ч» или «5 ч».
 func humanDuration(d time.Duration) string {
 	h := int(d.Hours())
+	if h < 1 {
+		return "менее часа"
+	}
 	if h >= 24 {
 		if r := h % 24; r > 0 {
 			return fmt.Sprintf("%d дн. %d ч", h/24, r)
@@ -115,14 +92,13 @@ func humanDuration(d time.Duration) string {
 // pingCallback ручные напоминания: adm:tp:<taskID> (по заданию), adm:up:<userID> (по всем заданиям покупателя).
 func (a *App) pingCallback(ctx context.Context, b *bot.Bot, admin *domain.User, parts []string) (string, *models.InlineKeyboardMarkup, string) {
 	id, _ := strconv.ParseInt(parts[2], 10, 64)
-	prefix := i18n.T(i18n.RU, "ping_prefix")
 	if parts[1] == "tp" {
 		toast := "Напоминание отправлено"
 		card, err := a.reminders.Ping(ctx, admin.TgID, id)
 		if err != nil {
 			toast = errText(err)
 		} else {
-			a.sendBuyerReminder(ctx, b, card, prefix)
+			a.sendBuyerReminder(ctx, b, card)
 			a.log.Info("ручное напоминание", "admin", maskID(admin.TgID), "task", id)
 		}
 		t, m := a.screenTask(ctx, id)
@@ -142,7 +118,7 @@ func (a *App) pingCallback(ctx context.Context, b *bot.Bot, admin *domain.User, 
 		toast += fmt.Sprintf(" (ещё %d недавно уже получали напоминание)", throttled)
 	}
 	for _, c := range cards {
-		a.sendBuyerReminder(ctx, b, c, prefix)
+		a.sendBuyerReminder(ctx, b, c)
 	}
 	t, m := a.screenUser(ctx, id)
 	return t, m, toast
@@ -152,32 +128,16 @@ func (a *App) pingCallback(ctx context.Context, b *bot.Bot, admin *domain.User, 
 
 const settingDialog = "setting"
 
-// settingInfo как называется настройка и что вводить.
+// settingInfo как называется настройка и что вводить. Интервалы напоминаний задаются в конфиге (.env), не здесь.
 var settingInfo = map[string]struct{ title, hint string }{
-	service.KeyRemindAccept: {"Напоминания о принятии", "Через сколько часов после отправки задания напоминать, если покупатель не ответил. Список по возрастанию, например: 24,48 (не больше 5). off отключает."},
-	service.KeyRemindReport: {"Напоминания об отчёте", "Через сколько часов после принятия задания (и после возврата отчёта на доработку) напоминать об отчёте. Например: 24,48. off отключает."},
-	service.KeyEscalate:     {"Эскалация админу", "Через сколько часов после последнего напоминания сообщить админу, что покупатель молчит. Число от 1 до 168, например: 24."},
-	service.KeyQuiet:        {"Тихие часы", "В это время напоминания покупателям не отправляются, а переносятся на утро. Формат: 22-9 (с 22:00 до 09:00) или off."},
-	service.KeyBackupTime:   {"Время ежедневного бэкапа", "Во сколько присылать копию базы (по времени бота). Формат: 03:00 или off."},
+	service.KeyBackupTime: {"Время ежедневного бэкапа", "Во сколько присылать копию базы (по времени бота). Формат: 03:00 или off."},
 }
 
-var settingCodes = map[string]string{
-	"accept": service.KeyRemindAccept, "report": service.KeyRemindReport, "esc": service.KeyEscalate,
-	"quiet": service.KeyQuiet, "backup": service.KeyBackupTime,
-}
+var settingCodes = map[string]string{"backup": service.KeyBackupTime}
 
-// settingsCallback экран настроек: adm:st, adm:sts:on, adm:ste:<код>, adm:stc, adm:stb.
+// settingsCallback экран настроек: adm:st, adm:ste:<код>, adm:stc, adm:stb.
 func (a *App) settingsCallback(ctx context.Context, b *bot.Bot, admin *domain.User, parts []string) (string, *models.InlineKeyboardMarkup, string) {
 	switch parts[1] {
-	case "sts": // включить или выключить напоминания
-		cfg, _ := a.settings.Reminders(ctx)
-		val := "0"
-		if !cfg.Enabled {
-			val = "1"
-		}
-		if _, err := a.settings.Set(ctx, admin.TgID, service.KeyRemindEnabled, val); err != nil {
-			a.log.Error("переключение напоминаний", "err", err)
-		}
 	case "ste":
 		key := settingCodes[parts[2]]
 		info, ok := settingInfo[key]
@@ -202,48 +162,18 @@ func (a *App) settingsCallback(ctx context.Context, b *bot.Bot, admin *domain.Us
 }
 
 func (a *App) screenSettings(ctx context.Context) (string, *models.InlineKeyboardMarkup) {
-	cfg, _ := a.settings.Reminders(ctx)
 	bk, _ := a.settings.Backup(ctx)
 	last, _ := a.settings.Value(ctx, service.KeyLastBackup)
 
-	list := func(h []int) string {
-		if len(h) == 0 {
-			return "отключено"
-		}
-		parts := make([]string, len(h))
-		for i, n := range h {
-			parts[i] = strconv.Itoa(n)
-		}
-		return strings.Join(parts, ", ") + " ч"
-	}
 	var sb strings.Builder
 	sb.WriteString("<b>Настройки</b>\n\n")
-	if cfg.Enabled {
-		sb.WriteString("Напоминания: <b>включены</b>\n")
-	} else {
-		sb.WriteString("Напоминания: <b>выключены</b>\n")
-	}
-	fmt.Fprintf(&sb, "О принятии (после отправки): %s\n", list(cfg.Accept))
-	fmt.Fprintf(&sb, "Об отчёте (после принятия): %s\n", list(cfg.Report))
-	fmt.Fprintf(&sb, "Эскалация админу: через %d ч после последнего напоминания\n", cfg.EscalateHours)
-	if cfg.QuietOn {
-		fmt.Fprintf(&sb, "Тихие часы: с %d:00 до %d:00 (%s)\n", cfg.QuietFrom, cfg.QuietTo, a.loc)
-	} else {
-		sb.WriteString("Тихие часы: нет\n")
-	}
 	if bk.Enabled {
-		fmt.Fprintf(&sb, "Бэкап базы: ежедневно в %02d:%02d, последний: %s\n", bk.Hour, bk.Minute, orDash(last))
+		fmt.Fprintf(&sb, "Бэкап базы: ежедневно в %02d:%02d (%s), последний: %s\n", bk.Hour, bk.Minute, a.loc, orDash(last))
 	} else {
 		sb.WriteString("Бэкап базы: отключён\n")
 	}
-	toggle := "🔕 Выключить напоминания"
-	if !cfg.Enabled {
-		toggle = "🔔 Включить напоминания"
-	}
+	sb.WriteString("\nИнтервалы напоминаний и тихие часы задаются в файле .env на сервере.")
 	return sb.String(), kb(
-		row(btn(toggle, "adm:sts")),
-		row(btn("✏ О принятии", "adm:ste:accept"), btn("✏ Об отчёте", "adm:ste:report")),
-		row(btn("✏ Эскалация", "adm:ste:esc"), btn("✏ Тихие часы", "adm:ste:quiet")),
 		row(btn("✏ Время бэкапа", "adm:ste:backup"), btn("💾 Бэкап сейчас", "adm:stb")),
 		row(btn("« Назад", "adm:home")),
 	)
@@ -266,13 +196,13 @@ func (a *App) onSettingValue(ctx context.Context, b *bot.Bot, admin *domain.User
 	}
 	val, err := a.settings.Set(ctx, admin.TgID, st.Key, text)
 	if err != nil {
-		a.send(ctx, b, admin.TgID, "❌ "+esc(errText(err))+"\nПопробуйте ещё раз или нажмите «Отмена» выше.", nil)
+		a.sendKeyed(ctx, b, admin.TgID, "err", "❌ "+esc(errText(err))+"\nПопробуйте ещё раз или нажмите «Отмена» выше.", nil)
 		return
 	}
 	_ = a.dialog.Clear(ctx, admin.TgID)
 	a.log.Info("настройка изменена", "admin", maskID(admin.TgID), "key", st.Key)
 	t, m := a.screenSettings(ctx)
-	a.send(ctx, b, admin.TgID, "✅ Сохранено: <code>"+esc(val)+"</code>\n\n"+t, m)
+	a.sendPanel(ctx, b, admin.TgID, "✅ Сохранено: <code>"+esc(val)+"</code>\n\n"+t, m)
 }
 
 // ---------- Бэкап ----------

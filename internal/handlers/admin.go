@@ -43,7 +43,8 @@ func letterOf(s domain.UserStatus) string {
 
 func (a *App) onAdmin(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	text, markup := a.screenHome(ctx)
-	a.send(ctx, b, userFrom(ctx).TgID, text, markup)
+	a.eat(ctx, b, upd.Message)
+	a.sendPanel(ctx, b, userFrom(ctx).TgID, text, markup)
 }
 
 // onAdminCallback разбирает "adm:<раздел>:<аргументы...>" и показывает нужный экран.

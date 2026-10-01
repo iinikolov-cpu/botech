@@ -21,9 +21,8 @@ const (
 type NoticeKind string
 
 const (
-	NoticeReminder   NoticeKind = "reminder"   // напоминание покупателю
-	NoticeEscalation NoticeKind = "escalation" // покупатель молчит, сообщаем админу
-	NoticeExpired    NoticeKind = "expired"    // срок задания вышел
+	NoticeReminder NoticeKind = "reminder" // напоминание покупателю
+	NoticeExpired  NoticeKind = "expired"  // срок задания вышел (уведомляется покупатель)
 )
 
 // Notice одно уведомление, которое планировщик просит отправить. Сервис сам ничего не отправляет:
@@ -34,26 +33,38 @@ type Notice struct {
 	Card    *TaskCard
 	Seq     int           // номер напоминания (для NoticeReminder)
 	Total   int           // сколько напоминаний предусмотрено
-	Sent    int           // сколько напоминаний уже отправлено (для эскалации)
 	Elapsed time.Duration // сколько прошло с момента, от которого считаются интервалы
+}
+
+// RemindConfig настройки напоминаний (задаются в конфиге, а не в боте).
+type RemindConfig struct {
+	Accept    []time.Duration // от отправки задания до принятия
+	Report    []time.Duration // от принятия (и от возврата на доработку) до отчёта
+	QuietOn   bool
+	QuietFrom int           // час начала тихих часов (0-23)
+	QuietTo   int           // час окончания
+	Stale     time.Duration // через сколько ожидания в списке заданий появляется отметка «давно без ответа»
 }
 
 // PingCooldown минимальный промежуток между ручными напоминаниями по одному заданию.
 const PingCooldown = 10 * time.Minute
 
-// Reminders автоматическая просрочка, напоминания и эскалация.
+// Reminders автоматическая просрочка и напоминания покупателям.
 type Reminders struct {
-	store    storage.Store
-	tasks    *Tasks
-	settings *Settings
-	loc      *time.Location
-	now      func() time.Time
+	store storage.Store
+	tasks *Tasks
+	cfg   RemindConfig
+	loc   *time.Location
+	now   func() time.Time
 }
 
 // NewReminders создаёт сервис. loc нужен для тихих часов.
-func NewReminders(store storage.Store, tasks *Tasks, settings *Settings, loc *time.Location) *Reminders {
-	return &Reminders{store: store, tasks: tasks, settings: settings, loc: loc, now: time.Now}
+func NewReminders(store storage.Store, tasks *Tasks, cfg RemindConfig, loc *time.Location) *Reminders {
+	return &Reminders{store: store, tasks: tasks, cfg: cfg, loc: loc, now: time.Now}
 }
+
+// Stale порог «давно без ответа» для отметок в списке заданий.
+func (r *Reminders) Stale() time.Duration { return r.cfg.Stale }
 
 // phaseSpec какие задания и от какого момента отсчитывать.
 type phaseSpec struct {
@@ -76,20 +87,13 @@ func (r *Reminders) Tick(ctx context.Context) ([]Notice, error) {
 	}
 	out = append(out, expired...)
 
-	cfg, err := r.settings.Reminders(ctx)
-	if err != nil {
-		return out, err
-	}
-	if !cfg.Enabled {
-		return out, nil
-	}
+	cfg := r.cfg
 	quiet := cfg.QuietOn && InQuiet(now.In(r.loc), cfg.QuietFrom, cfg.QuietTo)
-	escalate := time.Duration(cfg.EscalateHours) * time.Hour
 
 	specs := []phaseSpec{
-		{PhaseAccept, domain.TaskSent, HoursToDurations(cfg.Accept), func(c *TaskCard) time.Time { return c.Task.SentAt }},
-		{PhaseReport, domain.TaskAccepted, HoursToDurations(cfg.Report), func(c *TaskCard) time.Time { return c.Task.AcceptedAt }},
-		{PhaseRework, domain.TaskRework, HoursToDurations(cfg.Report), func(c *TaskCard) time.Time {
+		{PhaseAccept, domain.TaskSent, cfg.Accept, func(c *TaskCard) time.Time { return c.Task.SentAt }},
+		{PhaseReport, domain.TaskAccepted, cfg.Report, func(c *TaskCard) time.Time { return c.Task.AcceptedAt }},
+		{PhaseRework, domain.TaskRework, cfg.Report, func(c *TaskCard) time.Time {
 			if c.Report == nil {
 				return time.Time{}
 			}
@@ -109,7 +113,7 @@ func (r *Reminders) Tick(ctx context.Context) ([]Notice, error) {
 			if err != nil {
 				return out, err
 			}
-			n, err := r.step(ctx, card, sp, escalate, quiet, now)
+			n, err := r.step(ctx, card, sp, quiet, now)
 			if err != nil {
 				return out, err
 			}
@@ -144,7 +148,7 @@ func (r *Reminders) expire(ctx context.Context, now time.Time) ([]Notice, error)
 }
 
 // step применяет NextStep к одному заданию и записывает результат.
-func (r *Reminders) step(ctx context.Context, card *TaskCard, sp phaseSpec, escalate time.Duration, quiet bool, now time.Time) ([]Notice, error) {
+func (r *Reminders) step(ctx context.Context, card *TaskCard, sp phaseSpec, quiet bool, now time.Time) ([]Notice, error) {
 	base := sp.base(card)
 	if base.IsZero() {
 		return nil, nil
@@ -155,7 +159,7 @@ func (r *Reminders) step(ctx context.Context, card *TaskCard, sp phaseSpec, esca
 		if err != nil {
 			return err
 		}
-		st := NextStep(base, now, sp.offsets, escalate, done)
+		st := NextStep(base, now, sp.offsets, done)
 		switch {
 		case st.Remind > 0:
 			if quiet {
@@ -177,22 +181,6 @@ func (r *Reminders) step(ctx context.Context, card *TaskCard, sp phaseSpec, esca
 				return err
 			}
 			out = append(out, Notice{Kind: NoticeReminder, Phase: sp.phase, Card: card, Seq: st.Remind, Total: len(sp.offsets), Elapsed: now.Sub(base)})
-		case st.Escalate:
-			ok, err := repos.Reminders.Record(ctx, card.Task.ID, sp.phase, base, 0, false, now)
-			if err != nil || !ok {
-				return err
-			}
-			sent, err := repos.Reminders.Sent(ctx, card.Task.ID, sp.phase, base)
-			if err != nil {
-				return err
-			}
-			if err := repos.Tasks.AddEvent(ctx, &domain.TaskEvent{
-				TaskID: card.Task.ID, Kind: "escalation", At: now,
-				Details: fmt.Sprintf("покупатель не ответил, админу отправлено уведомление (%s)", phaseTitle(sp.phase)),
-			}); err != nil {
-				return err
-			}
-			out = append(out, Notice{Kind: NoticeEscalation, Phase: sp.phase, Card: card, Total: len(sp.offsets), Sent: sent, Elapsed: now.Sub(base)})
 		}
 		return nil
 	})

@@ -59,9 +59,16 @@ func run() error {
 		Dialog:    service.NewDialog(store),
 		Promos:    service.NewPromos(store, cfg.PromoMaxUses),
 		Reports:   service.NewReports(store, tasks),
-		Reminders: service.NewReminders(store, tasks, settings, cfg.Location),
-		Settings:  settings,
-		Backups:   service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
+		Reminders: service.NewReminders(store, tasks, service.RemindConfig{
+			Accept:    service.MinutesToDurations(cfg.RemindAcceptMinutes),
+			Report:    service.MinutesToDurations(cfg.RemindReportMinutes),
+			QuietOn:   cfg.QuietOn,
+			QuietFrom: cfg.QuietFrom,
+			QuietTo:   cfg.QuietTo,
+			Stale:     time.Duration(cfg.StaleMinutes) * time.Minute,
+		}, cfg.Location),
+		Settings: settings,
+		Backups:  service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
 
 		BackupChatID: cfg.FirstAdminID,
 	}, log, cfg.Location)

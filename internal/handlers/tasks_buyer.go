@@ -78,7 +78,8 @@ func (a *App) onTasksCommand(ctx context.Context, b *bot.Bot, upd *models.Update
 		return
 	}
 	text, markup := a.screenBuyerTasks(ctx, u)
-	a.send(ctx, b, u.TgID, text, markup)
+	a.eat(ctx, b, upd.Message)
+	a.sendPanel(ctx, b, u.TgID, text, markup)
 }
 
 func (a *App) screenBuyerTasks(ctx context.Context, u *domain.User) (string, *models.InlineKeyboardMarkup) {
@@ -231,5 +232,5 @@ func (a *App) warnNoPromo(ctx context.Context, b *bot.Bot, c *service.TaskCard) 
 	default:
 		return
 	}
-	a.notifyAdmins(ctx, b, text, kb(row(btn("🎁 Промокоды", "adm:pr"))))
+	a.notifyAdminsKeyed(ctx, b, "promo_warn", text, kb(row(btn("🎁 Промокоды", "adm:pr"))))
 }
