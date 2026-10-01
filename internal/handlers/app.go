@@ -27,6 +27,7 @@ type Services struct {
 	Reminders *service.Reminders
 	Settings  *service.Settings
 	Backups   *service.Backups
+	Analytics *service.Analytics
 
 	BackupChatID int64 // кому отправлять ежедневную копию базы (первый админ)
 }
@@ -42,6 +43,7 @@ type App struct {
 	reminders   *service.Reminders
 	settings    *service.Settings
 	backups     *service.Backups
+	analytics   *service.Analytics
 	backupChat  int64
 	log         *slog.Logger
 	loc         *time.Location
@@ -57,7 +59,7 @@ type App struct {
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
-		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, backupChat: svc.BackupChatID, log: log, loc: loc,
+		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, analytics: svc.Analytics, backupChat: svc.BackupChatID, log: log, loc: loc,
 		panels:     newPanelStore(),
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),

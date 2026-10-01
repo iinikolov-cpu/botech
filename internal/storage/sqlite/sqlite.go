@@ -108,6 +108,7 @@ func reposFor(q dbtx) storage.Repos {
 		Comps:     &compRepo{q},
 		Settings:  &settingsRepo{q},
 		Reminders: &reminderRepo{q},
+		Stats:     &statsRepo{q},
 	}
 }
 

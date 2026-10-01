@@ -108,6 +108,8 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
 	case "st", "sts", "ste", "stc", "stb":
 		text, markup, toast = a.settingsCallback(ctx, b, admin, parts)
+	case "sx", "ex", "exs", "exd":
+		text, markup, toast = a.statsCallback(ctx, b, admin, parts)
 	case "tp", "up":
 		text, markup, toast = a.pingCallback(ctx, b, admin, parts)
 	case "pr", "pra", "prc", "prl", "prd", "prda", "prdy", "prdl":
@@ -158,7 +160,7 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 		row(btn("📋 Сценарии", "adm:sc"), btn("🎁 Промокоды", "adm:pr")),
 		row(btn("💰 Компенсации", "adm:cp:w:0"), btn("🎟 Инвайты", "adm:inv")),
 		row(btn("🛡 Админы", "adm:adms"), btn("📜 Журнал", "adm:log")),
-		row(btn("⚙ Настройки", "adm:st")),
+		row(btn("📊 Статистика", "adm:sx:m"), btn("⚙ Настройки", "adm:st")),
 	)
 }
 

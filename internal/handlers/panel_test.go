@@ -115,3 +115,56 @@ func TestTaskListMarks(t *testing.T) {
 		t.Fatalf("карточка: %q", got)
 	}
 }
+
+// Статистика и выгрузки доступны админу, покупателю нет.
+func TestStatsAndExportScreens(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "50000")
+
+	e.click(testAdmin, "adm:home")
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Markup, "adm:sx:m") {
+		t.Fatalf("нет кнопки статистики: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:sx:m")
+	got := e.tg.last()
+	for _, want := range []string{"Статистика", "Отчётов получено: <b>1</b>", "BTS", "средняя оценка", "К выплате: 1 (50 000 сум)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("в статистике нет %q: %q", want, got)
+		}
+	}
+	e.click(testAdmin, "adm:sx:w")
+	e.click(testAdmin, "adm:ex:a")
+	if got := e.tg.last(); !strings.Contains(got, "Выгрузка в CSV") {
+		t.Fatalf("меню выгрузки: %q", got)
+	}
+	for _, d := range []string{"adm:exd:a:t", "adm:exd:a:c", "adm:exd:a:s:1", "adm:exd:a:a"} {
+		e.click(testAdmin, d)
+		if got := e.tg.lastAnswer(); got != "Файл отправлен" {
+			t.Fatalf("%s: %q", d, got)
+		}
+	}
+	var files []string
+	e.tg.mu.Lock()
+	for _, m := range e.tg.sent {
+		if m.Method == "sendDocument" && strings.HasSuffix(m.FileName, ".csv") && m.FileSize > 3 {
+			files = append(files, m.FileName)
+		}
+	}
+	e.tg.mu.Unlock()
+	if len(files) != 4 {
+		t.Fatalf("отправлено CSV: %v", files)
+	}
+	e.click(testAdmin, "adm:exs:a")
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Markup, "adm:exd:a:s:1") {
+		t.Fatalf("выбор сценария: %s", m.Markup)
+	}
+	// Покупателю недоступно.
+	e.click(2000, "adm:sx:m")
+	if got := e.tg.lastAnswer(); got != "Нет доступа." {
+		t.Fatalf("статистика у покупателя: %q", got)
+	}
+}

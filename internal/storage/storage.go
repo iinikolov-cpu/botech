@@ -172,6 +172,49 @@ type CompRepo interface {
 	FindByReceipt(ctx context.Context, uniqueID string, exceptTaskID int64) (int64, bool, error)
 }
 
+// ExportFilter условия выборки для статистики и выгрузок (нулевые значения = без фильтра).
+// Период считается по дате создания задания, To не включается.
+type ExportFilter struct {
+	From, To   time.Time
+	ScenarioID int64
+	Operator   string
+}
+
+// ExportRow одно задание со всем нужным для статистики и CSV: покупатель, сценарий, время этапов,
+// последняя версия отчёта с ответами, компенсация и промокод.
+type ExportRow struct {
+	TaskID     int64
+	UserID     int64
+	UserName   string
+	Username   string
+	ScenarioID int64
+	Key        string
+	Title      string
+	Operator   string
+	Version    int
+	Status     domain.TaskStatus
+
+	CreatedAt, SentAt, AcceptedAt, DueAt, DeclinedAt, ReportedAt, ReviewedAt time.Time
+
+	Revision int // версия отчёта (0, если отчёта нет)
+	Late     bool
+	Decision string
+	Answers  []domain.Answer
+
+	CompStatus domain.CompStatus // пусто, если компенсации нет
+	CompAmount int64
+	CompPaidAt time.Time
+
+	PromoCode string
+	Reminders int // сколько напоминаний отправлено покупателю
+}
+
+// StatsRepo выборки для статистики и выгрузок.
+type StatsRepo interface {
+	// Export возвращает задания (от новых к старым) с отчётом последней версии.
+	Export(ctx context.Context, f ExportFilter) ([]ExportRow, error)
+}
+
 // Repos набор всех репозиториев.
 type Repos struct {
 	Users     UserRepo
@@ -185,6 +228,7 @@ type Repos struct {
 	Comps     CompRepo
 	Settings  SettingsRepo
 	Reminders ReminderRepo
+	Stats     StatsRepo
 }
 
 // Store хранилище: репозитории + транзакции.

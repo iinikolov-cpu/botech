@@ -67,8 +67,9 @@ func run() error {
 			QuietTo:   cfg.QuietTo,
 			Stale:     time.Duration(cfg.StaleMinutes) * time.Minute,
 		}, cfg.Location),
-		Settings: settings,
-		Backups:  service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
+		Settings:  settings,
+		Analytics: service.NewAnalytics(store, cfg.Location),
+		Backups:   service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
 
 		BackupChatID: cfg.FirstAdminID,
 	}, log, cfg.Location)

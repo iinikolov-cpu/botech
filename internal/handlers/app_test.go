@@ -230,6 +230,7 @@ func newTestEnvUses(t *testing.T, promoUses int) *testEnv {
 			Accept: service.MinutesToDurations([]int{1440, 2880}), Report: service.MinutesToDurations([]int{1440, 2880}),
 			QuietOn: true, QuietFrom: 22, QuietTo: 9, Stale: 24 * time.Hour,
 		}, time.UTC), Settings: settings,
+		Analytics:    service.NewAnalytics(store, time.UTC),
 		Backups:      service.NewBackups(store, filepath.Join(t.TempDir(), "backups"), 3),
 		BackupChatID: testAdmin,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.UTC)
