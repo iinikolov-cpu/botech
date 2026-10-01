@@ -168,3 +168,34 @@ func TestStatsAndExportScreens(t *testing.T) {
 		t.Fatalf("статистика у покупателя: %q", got)
 	}
 }
+
+// Фото отчёта у админа исчезают, когда он уходит с экрана отчёта кнопкой.
+func TestReportMediaRemovedOnNavigate(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "50000")
+
+	e.click(testAdmin, "adm:rv:1")
+	before := e.tg.deletedCount()
+	e.click(testAdmin, "adm:tc:1") // назад к заданию: фото отчёта убираются
+	if got := e.tg.deletedCount() - before; got < 1 {
+		t.Fatalf("фото отчёта не удалены при переходе: %d", got)
+	}
+}
+
+// Ответы покупателя (фото, текст) убираются из чата после отправки отчёта.
+func TestBuyerAnswersRemovedAfterSubmit(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	before := e.tg.deletedCount()
+	e.completeReportWithComp(t, 2000, 1, "50000")
+	if e.tg.deletedCount()-before < 2 {
+		t.Fatalf("сообщения с ответами покупателя не удалены: %d", e.tg.deletedCount()-before)
+	}
+}

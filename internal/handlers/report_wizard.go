@@ -45,6 +45,10 @@ type reportState struct {
 	Amount          int64  `json:"amount"`
 	ReceiptFileID   string `json:"receipt_file_id"`
 	ReceiptUniqueID string `json:"receipt_unique_id"`
+
+	// Сообщения покупателя с ответами (фото, текст): после отправки отчёта удаляются из чата.
+	// Файлы остаются в Telegram, отчёт хранит их file_id.
+	Msgs []int `json:"msgs,omitempty"`
 }
 
 // loadReport читает состояние; ok=false, если активного отчёта нет.
@@ -469,6 +473,9 @@ func (a *App) onReportMessage(ctx context.Context, b *bot.Bot, u *domain.User, s
 		remind("rpt_wait_choice")
 		return
 	}
+	if len(st.Msgs) < 100 {
+		st.Msgs = append(st.Msgs, m.ID)
+	}
 	st.advance(len(qs))
 	st.Step++
 	a.saveReport(ctx, u.TgID, st)
@@ -506,6 +513,7 @@ func (a *App) submitReport(ctx context.Context, b *bot.Bot, u *domain.User, st *
 		text += i18n.T(l, "rpt_sent_late")
 	}
 	a.sendPanel(ctx, b, u.TgID, text, kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
+	a.deleteMsgs(ctx, b, u.TgID, st.Msgs)
 	a.log.Info("отчёт получен", "user", maskID(u.TgID), "task", st.TaskID, "late", res.Late)
 
 	msg := fmt.Sprintf("📝 Получен отчёт от %s по заданию #%d «%s»", userLabel(u), st.TaskID, esc(res.Card.Version.Body.Title))
@@ -593,6 +601,7 @@ func (a *App) submitCompFix(ctx context.Context, b *bot.Bot, u *domain.User, st 
 	}
 	_ = a.dialog.Clear(ctx, u.TgID)
 	a.sendPanel(ctx, b, u.TgID, i18n.T(l, "comp_fix_sent"), kb(row(btn(i18n.T(l, "btn_tasks"), "tsk:l"))))
+	a.deleteMsgs(ctx, b, u.TgID, st.Msgs)
 	a.log.Info("компенсация исправлена", "user", maskID(u.TgID), "task", st.TaskID)
 
 	card, err := a.tasks.Card(ctx, st.TaskID)

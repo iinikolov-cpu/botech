@@ -43,8 +43,10 @@ func (p *panelStore) swap(chat int64, msg int, extra []int) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c := p.get(chat)
-	if c.id == msg && extra == nil { // то же сообщение: связанный альбом остаётся
-		return nil
+	if c.id == msg && extra == nil { // пользователь перешёл на другой экран в том же сообщении: альбом больше не нужен
+		old := c.extra
+		c.extra = nil
+		return old
 	}
 	var old []int
 	if c.id != 0 && c.id != msg {
