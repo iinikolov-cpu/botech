@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 	_ "time/tzdata" // встроенная база часовых поясов: не нужна в образе
 
 	"github.com/go-telegram/bot"
@@ -15,6 +16,7 @@ import (
 
 	"botech/internal/config"
 	"botech/internal/handlers"
+	"botech/internal/scheduler"
 	"botech/internal/service"
 	"botech/internal/storage/sqlite"
 )
@@ -49,6 +51,7 @@ func run() error {
 	}
 
 	tasks := service.NewTasks(store, cfg.PromoMaxUses)
+	settings := service.NewSettings(store)
 	app := handlers.New(handlers.Services{
 		Access:    access,
 		Scenarios: service.NewScenarios(store),
@@ -56,6 +59,11 @@ func run() error {
 		Dialog:    service.NewDialog(store),
 		Promos:    service.NewPromos(store, cfg.PromoMaxUses),
 		Reports:   service.NewReports(store, tasks),
+		Reminders: service.NewReminders(store, tasks, settings, cfg.Location),
+		Settings:  settings,
+		Backups:   service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
+
+		BackupChatID: cfg.FirstAdminID,
 	}, log, cfg.Location)
 	b, err := bot.New(cfg.BotToken,
 		bot.WithMiddlewares(app.Middleware),
@@ -82,8 +90,16 @@ func run() error {
 		{Command: "help", Description: "Справка"},
 	}})
 
+	// Плановые задания работают внутри приложения: просрочка и напоминания каждую минуту,
+	// проверка времени ежедневного бэкапа каждые 5 минут. Состояние хранится в БД и переживает рестарт.
+	wait := scheduler.Start(ctx, log,
+		scheduler.Job{Name: "напоминания", Every: time.Minute, Run: func(c context.Context) error { return app.RunReminders(c, b) }},
+		scheduler.Job{Name: "бэкап", Every: 5 * time.Minute, Run: func(c context.Context) error { return app.RunBackup(c, b) }},
+	)
+
 	log.Info("бот запущен", "username", me.Username)
 	b.Start(ctx) // блокируется до сигнала остановки
+	wait()       // дожидаемся завершения плановых заданий до закрытия базы
 	log.Info("бот остановлен")
 	return nil
 }

@@ -206,6 +206,10 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	case domain.TaskAccepted, domain.TaskExpired, domain.TaskRework:
 		rows = append(rows, row(btn("🚫 Отменить задание", "adm:tcl:"+itoa(id))))
 	}
+	switch c.Task.Status {
+	case domain.TaskSent, domain.TaskAccepted, domain.TaskExpired, domain.TaskRework:
+		rows = append(rows, row(btn("🔔 Напомнить покупателю", "adm:tp:"+itoa(id))))
+	}
 	if c.Report != nil {
 		rows = append(rows, row(btn("📄 Открыть отчёт", "adm:rv:"+itoa(id))))
 	}
@@ -234,6 +238,12 @@ func describeEvent(e *domain.TaskEvent) string {
 		return "покупатель исправил данные компенсации"
 	case "promo_used":
 		return "использование промокода засчитано"
+	case "reminder":
+		return "напоминание покупателю: " + e.Details
+	case "escalation":
+		return "эскалация: " + e.Details
+	case "ping":
+		return "ручное напоминание от админа"
 	case "promo_issued":
 		return "выдан промокод"
 	case "promo_missing":

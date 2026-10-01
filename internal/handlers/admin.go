@@ -105,6 +105,10 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.taskAdminCallback(ctx, b, admin, parts)
 	case "as":
 		text, markup, toast = a.assignCallback(ctx, b, admin, parts)
+	case "st", "sts", "ste", "stc", "stb":
+		text, markup, toast = a.settingsCallback(ctx, b, admin, parts)
+	case "tp", "up":
+		text, markup, toast = a.pingCallback(ctx, b, admin, parts)
 	case "pr", "pra", "prc", "prl", "prd", "prda", "prdy", "prdl":
 		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
 	case "cp", "cc", "cv", "cpd", "cpy", "crj", "crx", "rv", "rr", "rw", "rwx":
@@ -153,6 +157,7 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 		row(btn("📋 Сценарии", "adm:sc"), btn("🎁 Промокоды", "adm:pr")),
 		row(btn("💰 Компенсации", "adm:cp:w:0"), btn("🎟 Инвайты", "adm:inv")),
 		row(btn("🛡 Админы", "adm:adms"), btn("📜 Журнал", "adm:log")),
+		row(btn("⚙ Настройки", "adm:st")),
 	)
 }
 
@@ -242,6 +247,9 @@ func (a *App) screenUser(ctx context.Context, id int64) (string, *models.InlineK
 	rows := [][]models.InlineKeyboardButton{}
 	if actions != nil {
 		rows = append(rows, actions)
+	}
+	if u.Role == domain.RoleBuyer && u.Status == domain.StatusActive {
+		rows = append(rows, row(btn("🔔 Напомнить о заданиях", "adm:up:"+itoa(id))))
 	}
 	rows = append(rows, row(btn("« К списку", "adm:u:"+letterOf(u.Status)+":0")))
 	return text, kb(rows...)

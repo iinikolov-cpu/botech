@@ -24,6 +24,11 @@ type Services struct {
 	Dialog    *service.Dialog
 	Promos    *service.Promos
 	Reports   *service.Reports
+	Reminders *service.Reminders
+	Settings  *service.Settings
+	Backups   *service.Backups
+
+	BackupChatID int64 // кому отправлять ежедневную копию базы (первый админ)
 }
 
 // App хранит зависимости обработчиков.
@@ -34,6 +39,10 @@ type App struct {
 	dialog      *service.Dialog
 	promos      *service.Promos
 	reports     *service.Reports
+	reminders   *service.Reminders
+	settings    *service.Settings
+	backups     *service.Backups
+	backupChat  int64
 	log         *slog.Logger
 	loc         *time.Location
 	botUsername string
@@ -46,7 +55,7 @@ type App struct {
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
-		promos: svc.Promos, reports: svc.Reports, log: log, loc: loc,
+		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, backupChat: svc.BackupChatID, log: log, loc: loc,
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}
@@ -87,6 +96,11 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 	case promoAddDialog:
 		if u.IsAdmin() && m.Text != "" {
 			a.importPromos(ctx, b, u, m.Text)
+			return
+		}
+	case settingDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.onSettingValue(ctx, b, u, m.Text)
 			return
 		}
 	case reworkDialog:

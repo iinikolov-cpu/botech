@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,10 @@ type Config struct {
 	DBPath       string
 	Location     *time.Location
 	LogLevel     string
+
+	// BackupDir папка для копий базы, BackupKeep сколько последних копий хранить.
+	BackupDir  string
+	BackupKeep int
 
 	// PromoMaxUses: сколько раз можно использовать каждый промокод (переменная PROMO_LOW_THRESHOLD).
 	PromoMaxUses int
@@ -46,6 +51,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("неизвестный часовой пояс %q: %w", tz, err)
 	}
 	c.Location = loc
+
+	c.BackupDir = getenv("BACKUP_DIR", filepath.Join(filepath.Dir(c.DBPath), "backups"))
+	c.BackupKeep = 7
+	if v := strings.TrimSpace(os.Getenv("BACKUP_KEEP")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 365 {
+			return nil, errors.New("BACKUP_KEEP должна быть числом от 1 до 365")
+		}
+		c.BackupKeep = n
+	}
 
 	c.PromoMaxUses = 1
 	if v := strings.TrimSpace(os.Getenv("PROMO_LOW_THRESHOLD")); v != "" {

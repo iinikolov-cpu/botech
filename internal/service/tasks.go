@@ -354,6 +354,12 @@ func (s *Tasks) Cancel(ctx context.Context, admin, taskID int64) (bool, error) {
 	})
 }
 
+// Expire помечает принятое задание просроченным (срок вышел, отчёта нет). false, если статус уже другой.
+// Код промокода остаётся за заданием: покупатель ещё может прислать отчёт, а админ может отменить задание.
+func (s *Tasks) Expire(ctx context.Context, taskID int64) (bool, error) {
+	return s.transition(ctx, taskID, 0, domain.TaskExpired, "срок вышел", nil)
+}
+
 // Card задание со сценарием, версией и покупателем.
 func (s *Tasks) Card(ctx context.Context, id int64) (*TaskCard, error) {
 	r := s.store.Repos()

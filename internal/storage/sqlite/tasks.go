@@ -76,6 +76,10 @@ func filterSQL(f storage.TaskFilter) (string, []any) {
 		cond += " AND scenario_id = ?"
 		args = append(args, f.ScenarioID)
 	}
+	if !f.DueBefore.IsZero() {
+		cond += " AND status = 'accepted' AND due_at > 0 AND due_at <= ?"
+		args = append(args, f.DueBefore.Unix())
+	}
 	const openComp = `EXISTS (SELECT 1 FROM compensations c WHERE c.task_id = tasks.id AND c.status IN ('pending','rejected'))`
 	var parts []string
 	if len(f.Statuses) > 0 {
@@ -203,6 +207,9 @@ func (r *taskRepo) DeleteUnstarted(ctx context.Context, id int64) (bool, error) 
 		return false, nil
 	}
 	if _, err := r.q.ExecContext(ctx, `DELETE FROM task_events WHERE task_id = ?`, id); err != nil {
+		return false, err
+	}
+	if _, err := r.q.ExecContext(ctx, `DELETE FROM task_reminders WHERE task_id = ?`, id); err != nil {
 		return false, err
 	}
 	res, err := r.q.ExecContext(ctx, `DELETE FROM tasks WHERE id = ? AND status IN ('created','sent','declined')`, id)

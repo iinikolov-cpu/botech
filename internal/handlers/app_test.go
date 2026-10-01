@@ -28,10 +28,12 @@ const testAdmin = int64(1000)
 
 // sentMsg сообщение, отправленное ботом через (поддельный) Telegram API.
 type sentMsg struct {
-	Method string
-	Chat   int64
-	Text   string
-	Markup string // reply_markup как JSON-строка (содержит callback-данные кнопок)
+	Method   string
+	Chat     int64
+	Text     string
+	Markup   string // reply_markup как JSON-строка (содержит callback-данные кнопок)
+	FileName string // для sendDocument: имя загруженного файла
+	FileSize int    // и его размер в байтах
 }
 
 // fakeTG подменяет Telegram API: запоминает отправленное и отдаёт файлы.
@@ -80,6 +82,17 @@ func (f *fakeTG) handler(w http.ResponseWriter, r *http.Request) {
 	case "sendPhoto", "sendVideo":
 		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
 		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["caption"], Markup: form["reply_markup"]})
+	case "sendDocument":
+		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
+		m := sentMsg{Method: method, Chat: chat, Text: form["caption"]}
+		if r.MultipartForm != nil {
+			for _, fhs := range r.MultipartForm.File {
+				if len(fhs) > 0 {
+					m.FileName, m.FileSize = fhs[0].Filename, int(fhs[0].Size)
+				}
+			}
+		}
+		f.sent = append(f.sent, m)
 	case "sendMediaGroup":
 		chat, _ := strconv.ParseInt(form["chat_id"], 10, 64)
 		f.sent = append(f.sent, sentMsg{Method: method, Chat: chat, Text: form["media"]})
@@ -158,6 +171,7 @@ type testEnv struct {
 	b     *bot.Bot
 	tg    *fakeTG
 	store *sqlite.Store
+	app   *App
 }
 
 func newTestBot(t *testing.T) (*bot.Bot, *fakeTG) {
@@ -185,9 +199,13 @@ func newTestEnvUses(t *testing.T, promoUses int) *testEnv {
 	t.Cleanup(srv.Close)
 
 	tasks := service.NewTasks(store, promoUses)
+	settings := service.NewSettings(store)
 	app := New(Services{
 		Access: access, Scenarios: service.NewScenarios(store), Tasks: tasks, Dialog: service.NewDialog(store),
 		Promos: service.NewPromos(store, promoUses), Reports: service.NewReports(store, tasks),
+		Reminders: service.NewReminders(store, tasks, settings, time.UTC), Settings: settings,
+		Backups:      service.NewBackups(store, filepath.Join(t.TempDir(), "backups"), 3),
+		BackupChatID: testAdmin,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.UTC)
 	b, err := bot.New("123:TEST",
 		bot.WithSkipGetMe(), bot.WithServerURL(srv.URL), bot.WithNotAsyncHandlers(),
@@ -197,7 +215,7 @@ func newTestEnvUses(t *testing.T, promoUses int) *testEnv {
 		t.Fatal(err)
 	}
 	app.Register(b, "testbot")
-	return &testEnv{b: b, tg: tg, store: store}
+	return &testEnv{b: b, tg: tg, store: store, app: app}
 }
 
 // addBuyer создаёт активного покупателя.
@@ -1080,5 +1098,273 @@ func TestReworkAfterRejectedCompensation(t *testing.T) {
 	e.click(testAdmin, "adm:cp:w:0")
 	if got := e.tg.last(); !strings.Contains(got, "140 000") || !strings.Contains(got, "Записей: 1") {
 		t.Fatalf("исправленная компенсация снова к выплате: %q", got)
+	}
+}
+
+// shift «старит» задание: сдвигает его отметки времени в прошлое, имитируя ход времени без ожидания.
+func (e *testEnv) shift(t *testing.T, taskID int64, d time.Duration) {
+	t.Helper()
+	sec := int64(d.Seconds())
+	if _, err := e.store.DB().Exec(`UPDATE tasks SET
+		sent_at     = CASE WHEN sent_at     > 0 THEN sent_at     - ?1 ELSE 0 END,
+		accepted_at = CASE WHEN accepted_at > 0 THEN accepted_at - ?1 ELSE 0 END,
+		due_at      = CASE WHEN due_at      > 0 THEN due_at      - ?1 ELSE 0 END
+		WHERE id = ?2`, sec, taskID); err != nil {
+		t.Fatal(err)
+	}
+	// Журнал напоминаний привязан к базовому моменту: сдвигаем его вместе с заданием,
+	// как будто прошло время, а не изменилась дата отправки.
+	if _, err := e.store.DB().Exec(`UPDATE task_reminders SET base_at = base_at - ?1, sent_at = sent_at - ?1 WHERE task_id = ?2`, sec, taskID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// quietOff отключает тихие часы, чтобы результат тестов не зависел от времени суток запуска.
+func (e *testEnv) quietOff(t *testing.T) {
+	t.Helper()
+	if _, err := e.app.settings.Set(context.Background(), testAdmin, service.KeyQuiet, "off"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *testEnv) runReminders(t *testing.T) {
+	t.Helper()
+	if err := e.app.RunReminders(context.Background(), e.b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// count сколько сообщений чату содержат подстроку.
+func (f *fakeTG) count(chat int64, substr string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, m := range f.sent {
+		if m.Chat == chat && strings.Contains(m.Text, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// Напоминания покупателю и эскалация админу по ходу времени.
+func TestReminderEscalationFlow(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.quietOff(t)
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1) // отправлено сейчас
+
+	e.runReminders(t)
+	if e.tg.count(2000, "Напоминание") != 0 {
+		t.Fatal("сразу после отправки напоминать рано")
+	}
+	e.shift(t, 1, 25*time.Hour)
+	e.runReminders(t)
+	if e.tg.count(2000, "ещё не ответили на задание") != 1 {
+		t.Fatal("нет первого напоминания через 24 ч")
+	}
+	m, _ := e.tg.lastTo(2000)
+	if !strings.Contains(m.Markup, "tsk:v:1") {
+		t.Fatalf("в напоминании нет кнопки открытия: %s", m.Markup)
+	}
+	e.runReminders(t) // повторный проход ничего не дублирует
+	if e.tg.count(2000, "ещё не ответили") != 1 {
+		t.Fatal("напоминание продублировалось")
+	}
+	e.shift(t, 1, 24*time.Hour) // всего 49 ч
+	e.runReminders(t)
+	if e.tg.count(2000, "ещё не ответили") != 2 {
+		t.Fatal("нет второго напоминания через 48 ч")
+	}
+	e.shift(t, 1, 24*time.Hour) // 73 ч: сутки после последнего
+	e.runReminders(t)
+	if got := e.tg.count(testAdmin, "Покупатель"); got == 0 || !e.tg.anyTo(testAdmin, "не ответил на задание #1") {
+		t.Fatal("админ не получил эскалацию")
+	}
+	if !e.tg.anyTo(testAdmin, "напоминаний отправлено: 2 из 2") {
+		t.Fatal("в эскалации нет счётчика напоминаний")
+	}
+	esc, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(esc.Markup, "adm:tp:1") || !strings.Contains(esc.Markup, "adm:tc:1") {
+		t.Fatalf("в эскалации нет кнопок: %s", esc.Markup)
+	}
+	e.runReminders(t)
+	if e.tg.count(testAdmin, "не ответил на задание #1") != 1 {
+		t.Fatal("эскалация продублировалась")
+	}
+	// Принятие останавливает напоминания о принятии.
+	e.click(2000, "tsk:ac:1")
+	before := e.tg.count(2000, "ещё не ответили")
+	e.shift(t, 1, 100*time.Hour)
+	e.runReminders(t)
+	if e.tg.count(2000, "ещё не ответили") != before {
+		t.Fatal("после принятия напоминаний о принятии быть не должно")
+	}
+}
+
+// Автоматическая просрочка: статус, уведомления покупателю и админу, вкладка «Просрочено».
+func TestAutoExpiry(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.quietOff(t)
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+
+	e.shift(t, 1, 71*time.Hour) // срок 3 дня: ещё не вышел
+	e.runReminders(t)
+	if e.tg.anyTo(2000, "Срок по заданию") {
+		t.Fatal("рано объявлять просрочку")
+	}
+	e.shift(t, 1, 2*time.Hour)
+	e.runReminders(t)
+	if !e.tg.anyTo(2000, "Срок по заданию «Полный отчёт» вышел") {
+		t.Fatal("покупатель не получил уведомление о просрочке")
+	}
+	m, _ := e.tg.lastTo(2000)
+	if !strings.Contains(m.Markup, "tsk:rp:1") {
+		t.Fatalf("в уведомлении о просрочке нет кнопки отчёта: %s", m.Markup)
+	}
+	if !e.tg.anyTo(testAdmin, "просрочено: покупатель") {
+		t.Fatal("админ не получил уведомление о просрочке")
+	}
+	e.click(testAdmin, "adm:tk:o:0")
+	if got := e.tg.last(); !strings.Contains(got, "найдено: 1") {
+		t.Fatalf("вкладка «Просрочено»: %q", got)
+	}
+	// Опоздавший отчёт принимается (с пометкой).
+	e.completeReportWithComp(t, 2000, 1, "50000")
+	if !e.tg.anyTo(testAdmin, "после срока") {
+		t.Fatal("отчёт после срока должен быть помечен")
+	}
+	// Повторных уведомлений о просрочке нет.
+	e.runReminders(t)
+	if e.tg.count(testAdmin, "просрочено: покупатель") != 1 {
+		t.Fatal("уведомление о просрочке продублировалось")
+	}
+}
+
+func TestManualPing(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+
+	e.click(testAdmin, "adm:tc:1")
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:tp:1") {
+		t.Fatalf("в карточке нет кнопки напоминания: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:tp:1")
+	if got := e.tg.lastAnswer(); got != "Напоминание отправлено" {
+		t.Fatalf("пинг: %q", got)
+	}
+	if !e.tg.anyTo(2000, "Администратор напоминает") {
+		t.Fatal("покупатель не получил напоминание")
+	}
+	e.click(testAdmin, "adm:tp:1")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "уже отправлено") {
+		t.Fatalf("повторный пинг сразу: %q", got)
+	}
+	// Пинг по покупателю целиком.
+	e.click(testAdmin, "adm:up:2000")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "Недавно уже напоминали") {
+		t.Fatalf("пинг покупателя: %q", got)
+	}
+	// Удалённое/завершённое: напоминать нечего.
+	e.click(2000, "tsk:dy:1")
+	e.click(testAdmin, "adm:tp:1")
+	if got := e.tg.lastAnswer(); !strings.Contains(got, "напоминать не нужно") {
+		t.Fatalf("пинг по отказавшемуся: %q", got)
+	}
+}
+
+func TestSettingsScreen(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.click(testAdmin, "adm:st")
+	if got := e.tg.last(); !strings.Contains(got, "24, 48 ч") || !strings.Contains(got, "Эскалация админу: через 24 ч") || !strings.Contains(got, "22:00 до 9:00") {
+		t.Fatalf("экран настроек по умолчанию: %q", got)
+	}
+	// Изменение интервалов.
+	e.click(testAdmin, "adm:ste:accept")
+	e.say(testAdmin, "36,12") // не по возрастанию
+	if got := e.tg.last(); !strings.Contains(got, "❌") || !strings.Contains(got, "по возрастанию") {
+		t.Fatalf("неверное значение: %q", got)
+	}
+	e.say(testAdmin, "12, 36")
+	if got := e.tg.last(); !strings.Contains(got, "Сохранено") || !strings.Contains(got, "12, 36 ч") {
+		t.Fatalf("сохранение: %q", got)
+	}
+	// Переключатель, тихие часы, отмена ввода.
+	e.click(testAdmin, "adm:sts")
+	if got := e.tg.last(); !strings.Contains(got, "выключены") {
+		t.Fatalf("выключение напоминаний: %q", got)
+	}
+	e.click(testAdmin, "adm:ste:quiet")
+	e.click(testAdmin, "adm:stc")
+	e.say(testAdmin, "off") // после отмены это обычный текст, настройка не меняется
+	e.click(testAdmin, "adm:st")
+	if got := e.tg.last(); !strings.Contains(got, "22:00 до 9:00") {
+		t.Fatalf("после отмены тихие часы не должны измениться: %q", got)
+	}
+	// Покупателю настройки недоступны.
+	e.click(2000, "adm:st")
+	if got := e.tg.lastAnswer(); got != "Нет доступа." {
+		t.Fatalf("настройки у покупателя: %q", got)
+	}
+}
+
+func TestBackupFlow(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+
+	// Бэкап по кнопке отправляется нажавшему админу файлом.
+	e.click(testAdmin, "adm:stb")
+	var doc sentMsg
+	e.tg.mu.Lock()
+	for _, m := range e.tg.sent {
+		if m.Method == "sendDocument" {
+			doc = m
+		}
+	}
+	e.tg.mu.Unlock()
+	if doc.Chat != testAdmin || !strings.HasSuffix(doc.FileName, ".db.gz") || doc.FileSize == 0 || !strings.Contains(doc.Text, "Копия базы по запросу") {
+		t.Fatalf("отправленный бэкап: %+v", doc)
+	}
+
+	// Ежедневный бэкап: время «00:00» уже наступило, отправляется один раз за день.
+	if _, err := e.app.settings.Set(ctx, testAdmin, service.KeyBackupTime, "00:00"); err != nil {
+		t.Fatal(err)
+	}
+	countDocs := func() int {
+		n := 0
+		e.tg.mu.Lock()
+		defer e.tg.mu.Unlock()
+		for _, m := range e.tg.sent {
+			if m.Method == "sendDocument" {
+				n++
+			}
+		}
+		return n
+	}
+	before := countDocs()
+	if err := e.app.RunBackup(ctx, e.b); err != nil {
+		t.Fatal(err)
+	}
+	if countDocs() != before+1 {
+		t.Fatal("ежедневный бэкап не отправлен")
+	}
+	if err := e.app.RunBackup(ctx, e.b); err != nil || countDocs() != before+1 {
+		t.Fatal("второй запуск в тот же день не должен делать копию")
+	}
+	// Отключённый бэкап не выполняется.
+	if _, err := e.app.settings.Set(ctx, testAdmin, service.KeyBackupTime, "off"); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.app.settings.SetInternal(ctx, service.KeyLastBackup, "")
+	if err := e.app.RunBackup(ctx, e.b); err != nil || countDocs() != before+1 {
+		t.Fatal("при отключённом бэкапе копия не делается")
 	}
 }

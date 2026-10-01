@@ -72,6 +72,8 @@ type TaskFilter struct {
 	ScenarioID   int64
 	Statuses     []domain.TaskStatus
 	ReviewedMode int
+	// DueBefore: только принятые задания, срок которых вышел к этому моменту.
+	DueBefore time.Time
 }
 
 // TaskRepo задания и их история.
@@ -89,6 +91,23 @@ type TaskRepo interface {
 	// DeleteUnstarted полностью удаляет задание вместе с историей, но только в статусах
 	// created, sent, declined (у них нет ни промокода, ни отчёта). false, если статус другой.
 	DeleteUnstarted(ctx context.Context, id int64) (bool, error)
+}
+
+// SettingsRepo настройки приложения (ключ-значение).
+type SettingsRepo interface {
+	Get(ctx context.Context, key string) (value string, ok bool, err error)
+	Set(ctx context.Context, key, value string, at time.Time) error
+	All(ctx context.Context) (map[string]string, error)
+}
+
+// ReminderRepo журнал напоминаний.
+type ReminderRepo interface {
+	// Seqs возвращает уже записанные номера (0 = эскалация) для задания, вида и базового момента.
+	Seqs(ctx context.Context, taskID int64, kind string, baseAt time.Time) (map[int]bool, error)
+	// Record записывает напоминание. false, если такая запись уже есть (повторный запуск не дублирует).
+	Record(ctx context.Context, taskID int64, kind string, baseAt time.Time, seq int, skipped bool, at time.Time) (bool, error)
+	// Sent сколько напоминаний покупателю реально отправлено (без пропущенных и эскалации).
+	Sent(ctx context.Context, taskID int64, kind string, baseAt time.Time) (int, error)
 }
 
 // FSMRepo состояние пошаговых диалогов.
@@ -164,6 +183,8 @@ type Repos struct {
 	Promos    PromoRepo
 	Reports   ReportRepo
 	Comps     CompRepo
+	Settings  SettingsRepo
+	Reminders ReminderRepo
 }
 
 // Store хранилище: репозитории + транзакции.
@@ -172,5 +193,7 @@ type Store interface {
 	Repos() Repos
 	// WithTx выполняет fn в одной транзакции (commit при nil, иначе rollback).
 	WithTx(ctx context.Context, fn func(r Repos) error) error
+	// Backup сохраняет согласованный снимок базы в файл dest (файл не должен существовать).
+	Backup(ctx context.Context, dest string) error
 	Close() error
 }

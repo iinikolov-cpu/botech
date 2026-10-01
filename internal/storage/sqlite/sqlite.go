@@ -69,6 +69,13 @@ func openRaw(path string) (*Store, error) {
 // DB отдаёт *sql.DB (нужно для бэкапа и тестов).
 func (s *Store) DB() *sql.DB { return s.db }
 
+// Backup делает снимок через VACUUM INTO: SQLite сама собирает согласованную копию, пока бот
+// продолжает работать. Копировать файл базы напрямую нельзя: при записи он может оказаться битым.
+func (s *Store) Backup(ctx context.Context, dest string) error {
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, dest)
+	return err
+}
+
 // Close закрывает базу.
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -99,6 +106,8 @@ func reposFor(q dbtx) storage.Repos {
 		Promos:    &promoRepo{q},
 		Reports:   &reportRepo{q},
 		Comps:     &compRepo{q},
+		Settings:  &settingsRepo{q},
+		Reminders: &reminderRepo{q},
 	}
 }
 
