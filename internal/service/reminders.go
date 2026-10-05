@@ -66,12 +66,35 @@ func NewReminders(store storage.Store, tasks *Tasks, cfg RemindConfig, loc *time
 // Stale порог «давно без ответа» для отметок в списке заданий.
 func (r *Reminders) Stale() time.Duration { return r.cfg.Stale }
 
+// tickPage размер страницы при обходе заданий: ограничений на общее число нет, обход идёт страницами.
+var tickPage = 500
+
 // phaseSpec какие задания и от какого момента отсчитывать.
 type phaseSpec struct {
 	phase   string
 	status  domain.TaskStatus
 	offsets []time.Duration
-	base    func(c *TaskCard) time.Time
+	// base момент, от которого идут интервалы (нулевой, если отсчёта нет). Берётся из самого
+	// задания, без сборки полной карточки: так проход каждую минуту остаётся дешёвым.
+	base func(ctx context.Context, t *domain.Task) (time.Time, error)
+}
+
+// eachTask обходит все задания по фильтру страницами. fn не должна менять статус заданий фильтра.
+func (r *Reminders) eachTask(ctx context.Context, f storage.TaskFilter, fn func(*domain.Task) error) error {
+	for off := 0; ; off += tickPage {
+		list, err := r.store.Repos().Tasks.List(ctx, f, tickPage, off)
+		if err != nil {
+			return err
+		}
+		for _, t := range list {
+			if err := fn(t); err != nil {
+				return err
+			}
+		}
+		if len(list) < tickPage {
+			return nil
+		}
+	}
 }
 
 // Tick один проход планировщика: отмечает просроченные задания и вычисляет напоминания.
@@ -88,36 +111,47 @@ func (r *Reminders) Tick(ctx context.Context) ([]Notice, error) {
 	out = append(out, expired...)
 
 	cfg := r.cfg
-	quiet := cfg.QuietOn && InQuiet(now.In(r.loc), cfg.QuietFrom, cfg.QuietTo)
+	if cfg.QuietOn && InQuiet(now.In(r.loc), cfg.QuietFrom, cfg.QuietTo) {
+		return out, nil // тихие часы: напоминания отправим после их окончания
+	}
 
+	taskBase := func(get func(*domain.Task) time.Time) func(context.Context, *domain.Task) (time.Time, error) {
+		return func(_ context.Context, t *domain.Task) (time.Time, error) { return get(t), nil }
+	}
 	specs := []phaseSpec{
-		{PhaseAccept, domain.TaskSent, cfg.Accept, func(c *TaskCard) time.Time { return c.Task.SentAt }},
-		{PhaseReport, domain.TaskAccepted, cfg.Report, func(c *TaskCard) time.Time { return c.Task.AcceptedAt }},
-		{PhaseRework, domain.TaskRework, cfg.Report, func(c *TaskCard) time.Time {
-			if c.Report == nil {
-				return time.Time{}
+		{PhaseAccept, domain.TaskSent, cfg.Accept, taskBase(func(t *domain.Task) time.Time { return t.SentAt })},
+		{PhaseReport, domain.TaskAccepted, cfg.Report, taskBase(func(t *domain.Task) time.Time { return t.AcceptedAt })},
+		{PhaseRework, domain.TaskRework, cfg.Report, func(ctx context.Context, t *domain.Task) (time.Time, error) {
+			rep, err := r.store.Repos().Reports.ByTask(ctx, t.ID)
+			if errors.Is(err, storage.ErrNotFound) {
+				return time.Time{}, nil
 			}
-			return c.Report.DecidedAt
+			if err != nil {
+				return time.Time{}, err
+			}
+			return rep.DecidedAt, nil
 		}},
 	}
 	for _, sp := range specs {
 		if len(sp.offsets) == 0 {
 			continue
 		}
-		list, err := r.store.Repos().Tasks.List(ctx, storage.TaskFilter{Statuses: []domain.TaskStatus{sp.status}}, 1000, 0)
+		sp := sp
+		err := r.eachTask(ctx, storage.TaskFilter{Statuses: []domain.TaskStatus{sp.status}}, func(t *domain.Task) error {
+			base, err := sp.base(ctx, t)
+			if err != nil {
+				return err
+			}
+			// Первое напоминание ещё не наступило: ничего читать и писать не нужно.
+			if base.IsZero() || now.Before(base.Add(sp.offsets[0])) {
+				return nil
+			}
+			n, err := r.step(ctx, t, sp, base, now)
+			out = append(out, n...)
+			return err
+		})
 		if err != nil {
 			return out, err
-		}
-		for _, t := range list {
-			card, err := r.tasks.Card(ctx, t.ID)
-			if err != nil {
-				return out, err
-			}
-			n, err := r.step(ctx, card, sp, quiet, now)
-			if err != nil {
-				return out, err
-			}
-			out = append(out, n...)
 		}
 	}
 	return out, nil
@@ -125,66 +159,74 @@ func (r *Reminders) Tick(ctx context.Context) ([]Notice, error) {
 
 // expire переводит принятые задания с вышедшим сроком в «просрочено».
 func (r *Reminders) expire(ctx context.Context, now time.Time) ([]Notice, error) {
-	list, err := r.store.Repos().Tasks.List(ctx, storage.TaskFilter{DueBefore: now}, 1000, 0)
-	if err != nil {
-		return nil, err
-	}
 	var out []Notice
-	for _, t := range list {
-		changed, err := r.tasks.Expire(ctx, t.ID)
+	for {
+		// Просроченные задания выходят из выборки, поэтому каждый раз читаем с начала.
+		list, err := r.store.Repos().Tasks.List(ctx, storage.TaskFilter{DueBefore: now}, tickPage, 0)
 		if err != nil {
 			return out, err
 		}
-		if !changed {
-			continue
+		changedAny := false
+		for _, t := range list {
+			changed, err := r.tasks.Expire(ctx, t.ID)
+			if err != nil {
+				return out, err
+			}
+			if !changed {
+				continue
+			}
+			changedAny = true
+			card, err := r.tasks.Card(ctx, t.ID)
+			if err != nil {
+				return out, err
+			}
+			out = append(out, Notice{Kind: NoticeExpired, Phase: PhaseReport, Card: card})
 		}
-		card, err := r.tasks.Card(ctx, t.ID)
-		if err != nil {
-			return out, err
+		if len(list) < tickPage || !changedAny {
+			return out, nil
 		}
-		out = append(out, Notice{Kind: NoticeExpired, Phase: PhaseReport, Card: card})
 	}
-	return out, nil
 }
 
-// step применяет NextStep к одному заданию и записывает результат.
-func (r *Reminders) step(ctx context.Context, card *TaskCard, sp phaseSpec, quiet bool, now time.Time) ([]Notice, error) {
-	base := sp.base(card)
-	if base.IsZero() {
-		return nil, nil
-	}
-	var out []Notice
+// step применяет NextStep к одному заданию и записывает результат. Карточка для уведомления
+// собирается только тогда, когда напоминание действительно нужно отправить.
+func (r *Reminders) step(ctx context.Context, t *domain.Task, sp phaseSpec, base, now time.Time) ([]Notice, error) {
+	var seq int
 	err := r.store.WithTx(ctx, func(repos storage.Repos) error {
-		done, err := repos.Reminders.Seqs(ctx, card.Task.ID, sp.phase, base)
+		done, err := repos.Reminders.Seqs(ctx, t.ID, sp.phase, base)
 		if err != nil {
 			return err
 		}
 		st := NextStep(base, now, sp.offsets, done)
-		switch {
-		case st.Remind > 0:
-			if quiet {
-				return nil // тихие часы: ничего не записываем, отправим после их окончания
-			}
-			for _, k := range st.Skipped {
-				if _, err := repos.Reminders.Record(ctx, card.Task.ID, sp.phase, base, k, true, now); err != nil {
-					return err
-				}
-			}
-			ok, err := repos.Reminders.Record(ctx, card.Task.ID, sp.phase, base, st.Remind, false, now)
-			if err != nil || !ok {
-				return err
-			}
-			if err := repos.Tasks.AddEvent(ctx, &domain.TaskEvent{
-				TaskID: card.Task.ID, Kind: "reminder", At: now,
-				Details: fmt.Sprintf("напоминание %d из %d (%s)", st.Remind, len(sp.offsets), phaseTitle(sp.phase)),
-			}); err != nil {
-				return err
-			}
-			out = append(out, Notice{Kind: NoticeReminder, Phase: sp.phase, Card: card, Seq: st.Remind, Total: len(sp.offsets), Elapsed: now.Sub(base)})
+		if st.Remind == 0 {
+			return nil
 		}
+		for _, k := range st.Skipped {
+			if _, err := repos.Reminders.Record(ctx, t.ID, sp.phase, base, k, true, now); err != nil {
+				return err
+			}
+		}
+		ok, err := repos.Reminders.Record(ctx, t.ID, sp.phase, base, st.Remind, false, now)
+		if err != nil || !ok {
+			return err
+		}
+		if err := repos.Tasks.AddEvent(ctx, &domain.TaskEvent{
+			TaskID: t.ID, Kind: "reminder", At: now,
+			Details: fmt.Sprintf("напоминание %d из %d (%s)", st.Remind, len(sp.offsets), phaseTitle(sp.phase)),
+		}); err != nil {
+			return err
+		}
+		seq = st.Remind
 		return nil
 	})
-	return out, err
+	if err != nil || seq == 0 {
+		return nil, err
+	}
+	card, err := r.tasks.Card(ctx, t.ID)
+	if err != nil {
+		return nil, err
+	}
+	return []Notice{{Kind: NoticeReminder, Phase: sp.phase, Card: card, Seq: seq, Total: len(sp.offsets), Elapsed: now.Sub(base)}}, nil
 }
 
 func phaseTitle(phase string) string {

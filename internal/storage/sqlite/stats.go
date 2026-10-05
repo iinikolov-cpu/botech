@@ -90,11 +90,33 @@ SELECT t.id, t.user_id, u.first_name, u.username,
 		return out, nil
 	}
 
-	// Ответы последних версий отчётов: одним запросом по всем (объём небольшой).
+	// Ответы последних версий отчётов: только по выбранным отчётам, пачками (лимит параметров SQLite).
+	ids := make([]int64, 0, len(reportIdx))
+	for id := range reportIdx {
+		ids = append(ids, id)
+	}
+	const chunk = 500
+	for start := 0; start < len(ids); start += chunk {
+		end := min(start+chunk, len(ids))
+		part := ids[start:end]
+		args := make([]any, len(part))
+		for i, id := range part {
+			args[i] = id
+		}
+		if err := r.loadAnswers(ctx, out, reportIdx, args); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// loadAnswers дописывает в rows ответы отчётов с указанными id.
+func (r *statsRepo) loadAnswers(ctx context.Context, out []storage.ExportRow, reportIdx map[int64]int, ids []any) error {
 	arows, err := r.q.QueryContext(ctx,
-		`SELECT report_id, question_key, type, value, file_id, file_unique_id, skipped FROM report_answers ORDER BY id`)
+		`SELECT report_id, question_key, type, value, file_id, file_unique_id, skipped FROM report_answers
+		  WHERE report_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) ORDER BY id`, ids...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer arows.Close()
 	for arows.Next() {
@@ -104,12 +126,12 @@ SELECT t.id, t.user_id, u.first_name, u.username,
 			skipped int
 		)
 		if err := arows.Scan(&rid, &a.Key, &a.Type, &a.Value, &a.FileID, &a.FileUniqueID, &skipped); err != nil {
-			return nil, err
+			return err
 		}
 		if i, ok := reportIdx[rid]; ok {
 			a.Skipped = skipped != 0
 			out[i].Answers = append(out[i].Answers, a)
 		}
 	}
-	return out, arows.Err()
+	return arows.Err()
 }

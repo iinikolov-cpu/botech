@@ -398,3 +398,42 @@ func TestDeleteTaskWithReminders(t *testing.T) {
 		t.Fatalf("после удаления напоминать некому: %v", kinds(got))
 	}
 }
+
+// Заданий больше, чем помещается на страницу: обрабатываются все, ни одно не теряется.
+func TestTickPagesThroughAllTasks(t *testing.T) {
+	ctx := context.Background()
+	old := tickPage
+	tickPage = 2
+	defer func() { tickPage = old }()
+
+	e := newEnv(t)
+	c := &clock{t: t0}
+	e.useClock(c)
+	rem := e.newReminders(c)
+	sc := e.importScenario(t, scenarioYAML).Scenario
+	for i := 0; i < 5; i++ {
+		e.assignOne(t, sc.ID, 1) // пять отправленных заданий
+	}
+	c.Set(t0.Add(24 * time.Hour))
+	if got := tick(t, rem); len(got) != 5 {
+		t.Fatalf("напоминаний %d, ожидали 5: %v", len(got), kinds(got))
+	}
+
+	// Просрочка: пять принятых заданий с вышедшим сроком обрабатываются за один проход.
+	for i := 0; i < 5; i++ {
+		id := e.assignOne(t, sc.ID, 2)
+		if _, _, err := e.tasks.Accept(ctx, 2, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Set(t0.Add(24*time.Hour + 4*24*time.Hour))
+	expired := 0
+	for _, n := range tick(t, rem) {
+		if n.Kind == NoticeExpired {
+			expired++
+		}
+	}
+	if expired != 5 {
+		t.Fatalf("просрочено %d, ожидали 5", expired)
+	}
+}
