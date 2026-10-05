@@ -11,10 +11,11 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
+          check-latest: true  # всегда свежий патч-релиз Go: в стандартной библиотеке бывают уязвимости
       - name: Форматирование
         run: test -z "$(gofmt -l .)"
       - name: go vet
@@ -29,6 +30,6 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Сборка образа
         run: docker build -t botech:ci .
