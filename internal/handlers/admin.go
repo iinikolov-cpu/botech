@@ -17,8 +17,6 @@ import (
 
 const pageSize = 8
 
-func itoa(i int64) string { return strconv.FormatInt(i, 10) }
-
 // Фильтры списка покупателей: буква в callback-данных -> статус.
 var statusByLetter = map[string]domain.UserStatus{
 	"p": domain.StatusPending,
@@ -218,13 +216,6 @@ func (a *App) screenUsers(ctx context.Context, status domain.UserStatus, page in
 		text += "\n\nСписок пуст."
 	}
 	return text, kb(rows...)
-}
-
-func mark(s string, on bool) string {
-	if on {
-		return "• " + s
-	}
-	return s
 }
 
 func (a *App) screenUser(ctx context.Context, id int64) (string, *models.InlineKeyboardMarkup) {

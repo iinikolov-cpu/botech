@@ -202,12 +202,3 @@ func (a *App) download(ctx context.Context, b *bot.Bot, fileID string, limit int
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, limit+1))
 }
-
-// cut обрезает строку по числу символов (для подписей кнопок).
-func cut(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
-}

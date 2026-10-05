@@ -14,6 +14,7 @@ build:
 
 lint:
 	go vet ./...
+	@command -v staticcheck >/dev/null && staticcheck ./... || echo "staticcheck не установлен (go install honnef.co/go/tools/cmd/staticcheck@latest)"
 
 # Запуск в Docker одной командой
 docker:

@@ -31,6 +31,21 @@ func TestLimiter(t *testing.T) {
 	}
 }
 
+// Карта лимитера не растёт без конца: устаревшие ключи вычищаются.
+func TestLimiterSweepsStaleKeys(t *testing.T) {
+	now := time.Now()
+	l := newLimiter(1, time.Minute)
+	l.now = func() time.Time { return now }
+	for i := int64(0); i < limiterSweepAt; i++ {
+		l.Allow(i)
+	}
+	now = now.Add(2 * time.Minute) // все прежние события устарели
+	l.Allow(-1)                    // превышение порога запускает чистку
+	if got := len(l.events); got > 2 {
+		t.Fatalf("после чистки осталось ключей: %d", got)
+	}
+}
+
 func TestMaskID(t *testing.T) {
 	tests := map[int64]string{123456789: "***6789", 12: "***"}
 	for in, want := range tests {

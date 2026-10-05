@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,47 @@ func userLabel(u *domain.User) string {
 	s := fmt.Sprintf(`<a href="tg://user?id=%d">%s</a>`, u.TgID, esc(name))
 	if u.Username != "" {
 		s += " @" + esc(u.Username)
+	}
+	return s
+}
+
+// itoa короткая запись числа для callback-данных.
+func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+// mark выделяет активную вкладку.
+func mark(s string, on bool) string {
+	if on {
+		return "• " + s
+	}
+	return s
+}
+
+// cut обрезает строку по числу символов (для подписей кнопок).
+func cut(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+// fmtMoney форматирует сумму с пробелами между тысячами: 150 000.
+func fmtMoney(v int64) string {
+	s := strconv.FormatInt(v, 10)
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
+// orDash подпись для пустой даты в настройках.
+func orDash(s string) string {
+	if s == "" {
+		return "ещё не было"
 	}
 	return s
 }
@@ -154,7 +196,23 @@ func (l *limiter) Allow(key int64) bool {
 		return false
 	}
 	l.events[key] = append(kept, now)
+	if len(l.events) > limiterSweepAt {
+		l.sweep(cut)
+	}
 	return true
+}
+
+// limiterSweepAt при каком числе ключей удалять устаревшие, чтобы карта не росла без конца
+// (например, при потоке сообщений от тысяч посторонних аккаунтов).
+const limiterSweepAt = 1024
+
+// sweep удаляет ключи, у которых не осталось событий внутри окна (вызывать под мьютексом).
+func (l *limiter) sweep(cut time.Time) {
+	for k, evs := range l.events {
+		if len(evs) == 0 || !evs[len(evs)-1].After(cut) {
+			delete(l.events, k)
+		}
+	}
 }
 
 // Blocked true, если лимит уже исчерпан (без записи нового события).

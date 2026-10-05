@@ -571,19 +571,6 @@ func parseAmount(s string) (int64, bool) {
 	return v, true
 }
 
-// fmtMoney форматирует сумму с пробелами между тысячами: 150 000.
-func fmtMoney(v int64) string {
-	s := strconv.FormatInt(v, 10)
-	var out []byte
-	for i, c := range []byte(s) {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			out = append(out, ' ')
-		}
-		out = append(out, c)
-	}
-	return string(out)
-}
-
 // submitCompFix отправляет исправленные данные компенсации и уведомляет админов.
 func (a *App) submitCompFix(ctx context.Context, b *bot.Bot, u *domain.User, st *reportState) {
 	l := lang(u)

@@ -1,0 +1,13 @@
+# Секреты и локальные данные не должны попадать в контекст сборки образа.
+.env
+.env.*
+!.env.example
+data/
+bin/
+*.db
+*.db-wal
+*.db-shm
+.git
+.gitignore
+docs/
+*.md

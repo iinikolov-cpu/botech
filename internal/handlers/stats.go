@@ -35,8 +35,7 @@ func (a *App) statsCallback(ctx context.Context, b *bot.Bot, admin *domain.User,
 	case "exd":
 		toast := a.sendExport(ctx, b, admin, period, parts[3:])
 		if toast == "" {
-			t, m := a.screenExport(period)
-			return t, m, "Файл отправлен"
+			toast = "Файл отправлен"
 		}
 		t, m := a.screenExport(period)
 		return t, m, toast

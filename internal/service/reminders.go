@@ -228,7 +228,7 @@ func (r *Reminders) Ping(ctx context.Context, admin, taskID int64) (*TaskCard, e
 		for _, e := range events {
 			if e.Kind == "ping" && now.Sub(e.At) < PingCooldown {
 				mins := int((PingCooldown - now.Sub(e.At)).Minutes()) + 1
-				return fmt.Errorf("%w: напоминание уже отправлено, повторить можно через %d мин.", ErrForbidden, mins)
+				return fmt.Errorf("%w: напоминание уже отправлено, повторить можно через %d мин", ErrForbidden, mins)
 			}
 		}
 		if err := repos.Tasks.AddEvent(ctx, &domain.TaskEvent{

@@ -74,21 +74,6 @@ func (a *App) sendBuyerReminder(ctx context.Context, b *bot.Bot, c *service.Task
 	}
 }
 
-// humanDuration «3 дн. 2 ч» или «5 ч».
-func humanDuration(d time.Duration) string {
-	h := int(d.Hours())
-	if h < 1 {
-		return "менее часа"
-	}
-	if h >= 24 {
-		if r := h % 24; r > 0 {
-			return fmt.Sprintf("%d дн. %d ч", h/24, r)
-		}
-		return fmt.Sprintf("%d дн.", h/24)
-	}
-	return fmt.Sprintf("%d ч", h)
-}
-
 // pingCallback ручные напоминания: adm:tp:<taskID> (по заданию), adm:up:<userID> (по всем заданиям покупателя).
 func (a *App) pingCallback(ctx context.Context, b *bot.Bot, admin *domain.User, parts []string) (string, *models.InlineKeyboardMarkup, string) {
 	id, _ := strconv.ParseInt(parts[2], 10, 64)
@@ -177,13 +162,6 @@ func (a *App) screenSettings(ctx context.Context) (string, *models.InlineKeyboar
 		row(btn("✏ Время бэкапа", "adm:ste:backup"), btn("💾 Бэкап сейчас", "adm:stb")),
 		row(btn("« Назад", "adm:home")),
 	)
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "ещё не было"
-	}
-	return s
 }
 
 // onSettingValue админ прислал новое значение настройки.

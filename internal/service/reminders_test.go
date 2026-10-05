@@ -31,12 +31,6 @@ func (e *env) useClock(c *clock) {
 	e.tasks.now = c.Now
 }
 
-func (e *env) settingsSvc(c *clock) *Settings {
-	s := NewSettings(e.store)
-	s.now = c.Now
-	return s
-}
-
 // newReminders создаёт «процесс» планировщика; повторный вызов имитирует перезапуск бота.
 func (e *env) newReminders(c *clock) *Reminders {
 	return e.newRemindersCfg(c, defaultRemindCfg())

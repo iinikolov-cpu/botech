@@ -5,6 +5,14 @@ services:
     env_file: .env
     volumes:
       - botdata:/data   # здесь лежит база данных, она переживает обновления
+    # Усиление защиты: бот не может менять файлы образа и не получает лишних прав.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: json-file
       options:

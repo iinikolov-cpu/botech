@@ -121,17 +121,17 @@ func (a *App) waitNote(c *service.TaskCard) string {
 	switch c.Task.Status {
 	case domain.TaskSent:
 		if d, ok := since(c.Task.SentAt); ok {
-			return "нет ответа " + humanDuration(d)
+			return "нет ответа " + service.FormatDuration(d)
 		}
 	case domain.TaskExpired:
-		if !c.Task.DueAt.IsZero() {
-			return "просрочено на " + humanDuration(time.Since(c.Task.DueAt))
+		if !c.Task.DueAt.IsZero() && time.Since(c.Task.DueAt) > 0 {
+			return "просрочено на " + service.FormatDuration(time.Since(c.Task.DueAt))
 		}
 		return "просрочено"
 	case domain.TaskRework:
 		if c.Report != nil {
 			if d, ok := since(c.Report.DecidedAt); ok {
-				return "на доработке " + humanDuration(d)
+				return "на доработке " + service.FormatDuration(d)
 			}
 		}
 	}
