@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +77,26 @@ func TestLoadReminderDefaults(t *testing.T) {
 	t.Setenv("STALE_MINUTES", "0")
 	if _, err := Load(); err == nil {
 		t.Fatal("STALE_MINUTES=0 должен давать ошибку")
+	}
+}
+
+func TestLoadPromoMaxUses(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "1:x")
+	t.Setenv("FIRST_ADMIN_ID", "5")
+	c, err := Load()
+	if err != nil || c.PromoMaxUses != 1 {
+		t.Fatalf("по умолчанию: %v %+v", err, c)
+	}
+	t.Setenv("PROMO_LOW_THRESHOLD", "4") // старое имя продолжает работать
+	if c, err = Load(); err != nil || c.PromoMaxUses != 4 {
+		t.Fatalf("старое имя: %v %+v", err, c)
+	}
+	t.Setenv("PROMO_MAX_USES", "7") // новое имя главнее
+	if c, err = Load(); err != nil || c.PromoMaxUses != 7 {
+		t.Fatalf("новое имя: %v %+v", err, c)
+	}
+	t.Setenv("PROMO_MAX_USES", "0")
+	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "PROMO_MAX_USES") {
+		t.Fatalf("ноль должен давать ошибку с именем переменной: %v", err)
 	}
 }

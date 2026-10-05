@@ -23,7 +23,7 @@ type Config struct {
 	BackupDir  string
 	BackupKeep int
 
-	// PromoMaxUses: сколько раз можно использовать каждый промокод (переменная PROMO_LOW_THRESHOLD).
+	// PromoMaxUses: сколько раз можно использовать каждый промокод (переменная PROMO_MAX_USES, прежнее имя PROMO_LOW_THRESHOLD тоже работает).
 	PromoMaxUses int
 
 	// Напоминания покупателям. Интервалы в минутах от момента события: отправки задания (принятие),
@@ -80,10 +80,14 @@ func Load() (*Config, error) {
 	}
 
 	c.PromoMaxUses = 1
-	if v := strings.TrimSpace(os.Getenv("PROMO_LOW_THRESHOLD")); v != "" {
+	name, v := "PROMO_MAX_USES", strings.TrimSpace(os.Getenv("PROMO_MAX_USES"))
+	if v == "" { // прежнее имя переменной, оставлено для совместимости со старыми файлами .env
+		name, v = "PROMO_LOW_THRESHOLD", strings.TrimSpace(os.Getenv("PROMO_LOW_THRESHOLD"))
+	}
+	if v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			return nil, errors.New("PROMO_LOW_THRESHOLD (сколько раз можно использовать промокод) должна быть числом от 1")
+			return nil, fmt.Errorf("%s (сколько раз можно использовать промокод) должна быть числом от 1", name)
 		}
 		c.PromoMaxUses = n
 	}
