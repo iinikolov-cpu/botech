@@ -28,6 +28,7 @@ type Services struct {
 	Settings  *service.Settings
 	Backups   *service.Backups
 	Analytics *service.Analytics
+	Items     *service.Items
 
 	BackupChatID int64 // кому отправлять ежедневную копию базы (первый админ)
 }
@@ -44,6 +45,7 @@ type App struct {
 	settings    *service.Settings
 	backups     *service.Backups
 	analytics   *service.Analytics
+	items       *service.Items
 	backupChat  int64
 	log         *slog.Logger
 	loc         *time.Location
@@ -59,7 +61,7 @@ type App struct {
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
-		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, analytics: svc.Analytics, backupChat: svc.BackupChatID, log: log, loc: loc,
+		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, analytics: svc.Analytics, items: svc.Items, backupChat: svc.BackupChatID, log: log, loc: loc,
 		panels:     newPanelStore(),
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
@@ -121,6 +123,18 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 		if u.IsAdmin() && m.Text != "" {
 			a.eat(ctx, b, m)
 			a.onCompRejectComment(ctx, b, u, m.Text)
+			return
+		}
+	case itemAddDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
+			a.importItems(ctx, b, u, m.Text)
+			return
+		}
+	case itemDelDialog:
+		if u.IsAdmin() && m.Text != "" {
+			a.eat(ctx, b, m)
+			a.deleteItems(ctx, b, u, m.Text)
 			return
 		}
 	case promoDelDialog:

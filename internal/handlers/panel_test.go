@@ -42,6 +42,9 @@ func TestPromoWarningNotDuplicated(t *testing.T) {
 	e.addBuyer(t, 2000, "Алия")
 	e.addBuyer(t, 2001, "Боря")
 	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	if _, err := e.app.items.Add(context.Background(), testAdmin, "Товар;https://x.uz/1"); err != nil {
+		t.Fatal(err) // свободный айтем есть: проверяем только предупреждения о промокодах
+	}
 	e.assignTo(2000, 1)
 	e.assignTo(2001, 1)
 

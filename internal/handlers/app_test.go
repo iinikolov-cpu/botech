@@ -230,6 +230,7 @@ func newTestEnvUses(t *testing.T, promoUses int) *testEnv {
 			Accept: service.MinutesToDurations([]int{1440, 2880}), Report: service.MinutesToDurations([]int{1440, 2880}),
 			QuietOn: true, QuietFrom: 22, QuietTo: 9, Stale: 24 * time.Hour,
 		}, time.UTC), Settings: settings,
+		Items:        service.NewItems(store),
 		Analytics:    service.NewAnalytics(store, time.UTC),
 		Backups:      service.NewBackups(store, filepath.Join(t.TempDir(), "backups"), 3),
 		BackupChatID: testAdmin,
@@ -511,8 +512,8 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 	if got := e.tg.last(); !strings.Contains(got, "BBB222") {
 		t.Fatalf("второй код: %q", got)
 	}
-	if e.tg.anyTo(testAdmin, "⚠") {
-		t.Fatal("предупреждений быть не должно, пока есть свободные коды")
+	if e.tg.anyTo(testAdmin, "Не осталось ни одного промокода") || e.tg.anyTo(testAdmin, "Все промокоды заняты") {
+		t.Fatal("предупреждений о промокодах быть не должно, пока есть свободные коды")
 	}
 	// Таблица кодов: два занятых, два свободных.
 	e.click(testAdmin, "adm:prl:0")
@@ -521,6 +522,7 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 	}
 
 	// Мастер отчёта.
+	e.ensureItem(t, 1)
 	e.click(2000, "tsk:rp:1")
 	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Вопрос 1 из 4") {
 		t.Fatalf("первый вопрос: %q", m.Text)
@@ -708,9 +710,35 @@ func TestTaskDeleteAndCancelFlow(t *testing.T) {
 	}
 }
 
+// ensureItem выбирает покупателю айтем под задание (отчёт покупателя без айтема не принимается).
+// Для заданий продавца и заданий с уже выбранным айтемом ничего не делает.
+func (e *testEnv) ensureItem(t *testing.T, taskID int64) {
+	t.Helper()
+	ctx := context.Background()
+	card, err := e.app.tasks.Card(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.Item != nil || card.Version.Body.Kind == domain.KindSeller {
+		return
+	}
+	line := fmt.Sprintf("Товар %d;https://shop.uz/item-%d-%d;100000", taskID, taskID, time.Now().UnixNano())
+	if _, err := e.app.items.Add(ctx, testAdmin, line); err != nil {
+		t.Fatal(err)
+	}
+	free, _, err := e.app.items.ListFree(ctx, 1, 0)
+	if err != nil || len(free) == 0 {
+		t.Fatalf("нет свободного айтема: %v", err)
+	}
+	if _, err := e.app.items.Choose(ctx, card.Task.UserID, taskID, free[0].ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // completeReport проходит мастер отчёта для reportFlowScenario без компенсации.
 func (e *testEnv) completeReport(t *testing.T, user, taskID int64) {
 	t.Helper()
+	e.ensureItem(t, taskID)
 	e.click(user, fmt.Sprintf("tsk:rp:%d", taskID))
 	e.press(t, user, "rpt:r:", ":5")
 	e.press(t, user, "rpt:y:", ":yes")
@@ -820,6 +848,7 @@ func (f *fakeTG) methodsTo(chat int64) []string {
 // completeReportWithComp проходит мастер для reportFlowScenario с компенсацией.
 func (e *testEnv) completeReportWithComp(t *testing.T, user, taskID int64, amount string) {
 	t.Helper()
+	e.ensureItem(t, taskID)
 	e.click(user, fmt.Sprintf("tsk:rp:%d", taskID))
 	e.press(t, user, "rpt:r:", ":5")
 	e.press(t, user, "rpt:y:", ":yes")
@@ -1015,6 +1044,7 @@ func TestReportMediaBeforeButtons(t *testing.T) {
 	e.upload(testAdmin, "album.yaml", albumScenario)
 	e.assignTo(2000, 1)
 	e.click(2000, "tsk:ac:1")
+	e.ensureItem(t, 1)
 	e.click(2000, "tsk:rp:1")
 	e.sendPhoto(2000, "A1")
 	e.sendPhoto(2000, "A2")

@@ -49,6 +49,7 @@ type TaskCard struct {
 	Promo    *domain.PromoAssignment // выдача промокода (nil, если не выдавали)
 	Comp     *domain.Compensation    // данные компенсации (nil, если нет)
 	Report   *domain.Report          // последняя версия отчёта (nil, если отчёта нет)
+	Item     *domain.Item            // выбранный покупателем айтем (nil, если не выбран или задание продавца)
 
 	// PromoReason заполняется результатом Accept и IssuePromo, когда кода нет.
 	PromoReason PromoReason
@@ -370,7 +371,10 @@ func (s *Tasks) Delete(ctx context.Context, admin, taskID int64) error {
 func (s *Tasks) Cancel(ctx context.Context, admin, taskID int64) (bool, error) {
 	// Код возвращается в оборот без списания использования: задание не выполнено.
 	release := func(r storage.Repos, t *domain.Task, now time.Time) error {
-		_, err := r.Promos.Release(ctx, t.ID, false, now)
+		if _, err := r.Promos.Release(ctx, t.ID, false, now); err != nil {
+			return err
+		}
+		_, err := r.Items.Release(ctx, t.ID, false, now) // выбранный айтем возвращается в список свободных
 		return err
 	}
 	changed, err := s.transition(ctx, taskID, 0, domain.TaskCancelled, "отменено админом", release)
@@ -422,6 +426,9 @@ func (s *Tasks) card(ctx context.Context, r storage.Repos, t *domain.Task) (*Tas
 		return nil, err
 	}
 	if c.Report, err = r.Reports.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	if c.Item, err = r.Items.ByTask(ctx, t.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return nil, err
 	}
 	return c, nil

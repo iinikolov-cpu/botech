@@ -68,6 +68,7 @@ func run() error {
 			Stale:     time.Duration(cfg.StaleMinutes) * time.Minute,
 		}, cfg.Location),
 		Settings:  settings,
+		Items:     service.NewItems(store),
 		Analytics: service.NewAnalytics(store, cfg.Location),
 		Backups:   service.NewBackups(store, cfg.BackupDir, cfg.BackupKeep),
 

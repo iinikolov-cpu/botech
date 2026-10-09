@@ -4,6 +4,7 @@ import (
 	"botech/internal/storage"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,7 +89,34 @@ func (e *env) acceptedTask(t *testing.T, scenarioID, user int64) int64 {
 	if _, _, err := e.tasks.Accept(context.Background(), user, id); err != nil {
 		t.Fatal(err)
 	}
+	e.ensureItem(t, user, id)
 	return id
+}
+
+// ensureItem выбирает покупателю айтем под задание (отчёт покупателя без айтема не принимается).
+// Для заданий продавца и заданий с уже выбранным айтемом ничего не делает.
+func (e *env) ensureItem(t *testing.T, user, taskID int64) {
+	t.Helper()
+	ctx := context.Background()
+	card, err := e.tasks.Card(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.Item != nil || card.Version.Body.Kind == domain.KindSeller {
+		return
+	}
+	items := NewItems(e.store)
+	line := fmt.Sprintf("Товар %d;https://shop.uz/%d-%d", taskID, taskID, time.Now().UnixNano())
+	if _, err := items.Add(ctx, firstAdmin, line); err != nil {
+		t.Fatal(err)
+	}
+	free, _, err := items.ListFree(ctx, 1, 0)
+	if err != nil || len(free) == 0 {
+		t.Fatalf("нет свободного айтема: %v", err)
+	}
+	if _, err := items.Choose(ctx, user, taskID, free[0].ID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSubmitReport(t *testing.T) {
@@ -152,6 +180,7 @@ func TestSubmitReportRules(t *testing.T) {
 		{"сумма слишком большая", SubmitInput{Answers: goodAnswers(), Comp: &CompInput{Amount: MaxCompAmount + 1, ReceiptFileID: "R"}}},
 		{"нет чека", SubmitInput{Answers: goodAnswers(), Comp: &CompInput{Amount: 100}}},
 	}
+	e.ensureItem(t, 1, sent)
 	for _, tc := range bad {
 		if _, err := r.Submit(ctx, 1, sent, tc.in); !errors.Is(err, ErrInvalidReport) {
 			t.Errorf("%s: ожидали ErrInvalidReport, получили %v", tc.name, err)
@@ -270,6 +299,7 @@ func TestCompensationPaid(t *testing.T) {
 // reportOK отправляет валидный отчёт по заданию сценария scenarioYAML (один текстовый вопрос).
 func (e *env) reportOK(t *testing.T, user, taskID int64) {
 	t.Helper()
+	e.ensureItem(t, user, taskID)
 	if _, err := e.reports().Submit(context.Background(), user, taskID, SubmitInput{
 		Answers: []domain.Answer{{Key: "q_one", Value: "ответ"}},
 	}); err != nil {

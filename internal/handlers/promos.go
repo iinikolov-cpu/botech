@@ -217,11 +217,17 @@ func (a *App) onPromoFile(ctx context.Context, b *bot.Bot, admin *domain.User, d
 		a.sendPanel(ctx, b, admin.TgID, "Не удалось скачать файл, попробуйте ещё раз.", back)
 		return
 	}
-	if state, _ := a.dialog.Get(ctx, admin.TgID, nil); state == promoDelDialog {
+	// Куда направить файл, определяет открытый раздел; без него это список промокодов.
+	switch state, _ := a.dialog.Get(ctx, admin.TgID, nil); state {
+	case promoDelDialog:
 		a.deletePromos(ctx, b, admin, string(data))
-		return
+	case itemAddDialog:
+		a.importItems(ctx, b, admin, string(data))
+	case itemDelDialog:
+		a.deleteItems(ctx, b, admin, string(data))
+	default:
+		a.importPromos(ctx, b, admin, string(data))
 	}
-	a.importPromos(ctx, b, admin, string(data))
 }
 
 // notifyAdmins рассылает текст всем активным админам.

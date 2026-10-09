@@ -60,6 +60,10 @@ func (a *App) startReport(ctx context.Context, b *bot.Bot, u *domain.User, cb *m
 		}
 		return
 	}
+	if card, err := a.tasks.Card(ctx, taskID); err == nil && card.Version.Body.Kind != domain.KindSeller && card.Item == nil {
+		a.answerCB(ctx, b, cb.ID, i18n.T(l, "rpt_need_item"), true)
+		return
+	}
 	a.answerCB(ctx, b, cb.ID, "", false)
 	st, ok := a.loadReport(ctx, u.TgID)
 	if !ok || st.TaskID != taskID || st.CompOnly {

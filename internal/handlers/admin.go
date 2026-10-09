@@ -110,6 +110,8 @@ func (a *App) onAdminCallback(ctx context.Context, b *bot.Bot, upd *models.Updat
 		text, markup, toast = a.statsCallback(ctx, b, admin, parts)
 	case "tp", "up":
 		text, markup, toast = a.pingCallback(ctx, b, admin, parts)
+	case "it", "ita", "itc", "itl", "itd", "itdl", "itda", "itdy":
+		text, markup, toast = a.itemCallback(ctx, b, admin, parts)
 	case "pr", "pra", "prc", "prl", "prd", "prda", "prdy", "prdl":
 		text, markup, toast = a.promoCallback(ctx, b, admin, parts)
 	case "cp", "cc", "cv", "cpd", "cpy", "crj", "crx", "rv", "rr", "rw", "rwx":
@@ -155,7 +157,8 @@ func (a *App) screenHome(ctx context.Context) (string, *models.InlineKeyboardMar
 	return text, kb(
 		row(btn(buyers, "adm:u:"+pendingOrActive(nPending)+":0")),
 		row(btn("📌 Задания", "adm:tk:a:0"), btn("➕ Назначить", "adm:as:0")),
-		row(btn("📋 Сценарии", "adm:sc"), btn("🎁 Промокоды", "adm:pr")),
+		row(btn("📋 Сценарии", "adm:sc"), btn("🛒 Айтемы", "adm:it")),
+		row(btn("🎁 Промокоды", "adm:pr")),
 		row(btn("💰 Компенсации", "adm:cp:w:0"), btn("🎟 Инвайты", "adm:inv")),
 		row(btn("🛡 Админы", "adm:adms"), btn("📜 Журнал", "adm:log")),
 		row(btn("📊 Статистика", "adm:sx:m"), btn("⚙ Настройки", "adm:st")),

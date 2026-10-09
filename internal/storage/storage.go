@@ -150,6 +150,30 @@ type PromoRepo interface {
 	DeleteAllFree(ctx context.Context) (int, error)
 }
 
+// ItemRepo пул айтемов (товаров для покупки). Айтем одноразовый: свободен -> выбран -> куплен.
+type ItemRepo interface {
+	// AddBatch добавляет айтемы (заполнены Title, URL, Price, Note); айтем с уже существующей ссылкой пропускается.
+	AddBatch(ctx context.Context, items []*domain.Item, addedBy int64, at time.Time) (int, error)
+	Get(ctx context.Context, id int64) (*domain.Item, error)
+	// ListFree свободные айтемы страницей (по порядку добавления) с общим числом.
+	ListFree(ctx context.Context, limit, offset int) ([]*domain.Item, int, error)
+	// List все айтемы страницей для таблицы админа с общим числом.
+	List(ctx context.Context, limit, offset int) ([]*domain.Item, int, error)
+	// Reserve закрепляет свободный айтем за заданием. false, если айтем уже не свободен.
+	// ErrDuplicate, если за заданием уже закреплён другой айтем.
+	Reserve(ctx context.Context, itemID, taskID int64, at time.Time) (bool, error)
+	// ByTask айтем задания (ErrNotFound, если не выбран).
+	ByTask(ctx context.Context, taskID int64) (*domain.Item, error)
+	// Release завершает закрепление: used=true помечает айтем купленным, false возвращает в оборот.
+	// false, если активного закрепления нет.
+	Release(ctx context.Context, taskID int64, used bool, at time.Time) (bool, error)
+	Stats(ctx context.Context) (domain.ItemStats, error)
+	// DeleteFree удаляет свободные айтемы с указанными номерами, возвращает число удалённых.
+	DeleteFree(ctx context.Context, ids []int64) (int, error)
+	// DeleteAllFree удаляет все свободные айтемы.
+	DeleteAllFree(ctx context.Context) (int, error)
+}
+
 // ReportRepo отчёты и ответы.
 type ReportRepo interface {
 	// Create сохраняет новую версию отчёта (заполняет ID и Revision: 1 для первого, далее по порядку).
@@ -234,6 +258,7 @@ type Repos struct {
 	Settings  SettingsRepo
 	Reminders ReminderRepo
 	Stats     StatsRepo
+	Items     ItemRepo
 }
 
 // Store хранилище: репозитории + транзакции.

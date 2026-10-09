@@ -157,6 +157,14 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 		if err != nil {
 			return err
 		}
+		if ver.Body.Kind != domain.KindSeller {
+			// Покупатель сначала выбирает, что покупать: отчёт без выбранного айтема не принимается.
+			if _, err := r.Items.ByTask(ctx, taskID); errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("%w: сначала выберите товар, который нужно купить", ErrForbidden)
+			} else if err != nil {
+				return err
+			}
+		}
 		if in.Comp != nil {
 			if ver.Body.Kind == domain.KindSeller {
 				return fmt.Errorf("%w: по заданию продавца компенсация не предусмотрена", ErrForbidden)
@@ -200,6 +208,15 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			details = fmt.Sprintf("версия отчёта %d, после доработки", rep.Revision)
 		}
 		res.Late, res.Report = late, rep
+
+		// Выбранный айтем считается купленным (при повторной отправке после доработки это ничего не меняет).
+		if used, err := r.Items.Release(ctx, taskID, true, now); err != nil {
+			return err
+		} else if used {
+			if err := r.Tasks.AddEvent(ctx, &domain.TaskEvent{TaskID: taskID, Kind: "item_used", Details: "товар куплен", At: now}); err != nil {
+				return err
+			}
+		}
 
 		// Выполненное задание засчитывает использование кода, и код возвращается в оборот.
 		if released, err := r.Promos.Release(ctx, taskID, true, now); err != nil {

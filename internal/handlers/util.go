@@ -54,6 +54,14 @@ func userLabel(u *domain.User) string {
 	return s
 }
 
+// lastPart последний элемент разобранных callback-данных ("" для пустого списка).
+func lastPart(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
 // itoa короткая запись числа для callback-данных.
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
 

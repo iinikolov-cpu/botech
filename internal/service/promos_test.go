@@ -142,6 +142,7 @@ func TestPromoReusableLifecycle(t *testing.T) {
 	}
 
 	// Первое задание выполнено: использование засчитано, код свободен (осталось 1 из 2).
+	e.ensureItem(t, 1, t1)
 	res, err := r.Submit(ctx, 1, t1, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}})
 	if err != nil || res.PoolExhausted {
 		t.Fatalf("отчёт: err=%v exhausted=%v", err, res.PoolExhausted)
@@ -160,6 +161,7 @@ func TestPromoReusableLifecycle(t *testing.T) {
 		t.Fatalf("повторная выдача: err=%v %+v", err, c2)
 	}
 	// Второе выполнение исчерпывает код: админу нужно предупреждение.
+	e.ensureItem(t, 2, t2)
 	res, err = r.Submit(ctx, 2, t2, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}})
 	if err != nil || !res.PoolExhausted {
 		t.Fatalf("исчерпание пула: err=%v exhausted=%v", err, res.PoolExhausted)
@@ -352,6 +354,7 @@ func TestPromoDelete(t *testing.T) {
 	}
 
 	// После выполнения задания код (уже не занятый) удаляется, а история выдачи остаётся.
+	e.ensureItem(t, 1, id)
 	if _, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}}); err != nil {
 		t.Fatal(err)
 	}

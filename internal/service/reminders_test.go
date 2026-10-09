@@ -227,6 +227,7 @@ func TestTickReportAndExpiry(t *testing.T) {
 		t.Fatalf("просроченным больше не напоминаем: %v", kinds(got))
 	}
 	// Опоздавший отчёт всё равно принимается.
+	e.ensureItem(t, 1, id)
 	if _, err := e.reportsAt(c).Submit(ctx, 1, id, SubmitInput{Answers: []domain.Answer{{Key: "q_one", Value: "ок"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +247,7 @@ func TestTickRework(t *testing.T) {
 		t.Fatal(err)
 	}
 	answers := []domain.Answer{{Key: "q_one", Value: "ок"}}
+	e.ensureItem(t, 1, id)
 	if _, err := rep.Submit(ctx, 1, id, SubmitInput{Answers: answers}); err != nil {
 		t.Fatal(err)
 	}

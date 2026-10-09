@@ -53,6 +53,18 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 		sb.WriteString("\n" + i18n.T(l, "promo_pending") + "\n")
 	}
 
+	needItem := false // покупатель ещё не выбрал товар: отчёт пока недоступен
+	if !seller {
+		active := t.Status == domain.TaskAccepted || t.Status == domain.TaskExpired
+		switch {
+		case c.Item != nil:
+			sb.WriteString("\n🛒 Товар для покупки: " + itemText(c.Item) + "\n")
+		case active:
+			sb.WriteString("\n" + i18n.T(l, "item_pending") + "\n")
+			needItem = true
+		}
+	}
+
 	id := itoa(t.ID)
 	var rows [][]models.InlineKeyboardButton
 	switch t.Status {
@@ -62,7 +74,11 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 		if !seller && c.Promo == nil {
 			rows = append(rows, row(btn(i18n.T(l, "btn_get_promo"), "tsk:pc:"+id)))
 		}
-		rows = append(rows, row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))
+		if needItem {
+			rows = append(rows, row(btn(i18n.T(l, "btn_choose_item"), "tsk:it:"+id)))
+		} else {
+			rows = append(rows, row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))
+		}
 	case domain.TaskRework:
 		rows = append(rows, row(btn(i18n.T(l, "btn_fix_report"), "tsk:rp:"+id)))
 	}
@@ -71,6 +87,56 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	}
 	rows = append(rows, row(btn(i18n.T(l, "btn_back_list"), "tsk:l")))
 	return sb.String(), kb(rows...)
+}
+
+// itemText название, цена, заметка и ссылка айтема для карточки задания.
+func itemText(it *domain.Item) string {
+	s := "<b>" + esc(it.Title) + "</b>"
+	if it.Price > 0 {
+		s += " (" + fmtMoney(it.Price) + " сум)"
+	}
+	if it.Note != "" {
+		s += "\n" + esc(it.Note)
+	}
+	return s + "\n" + esc(it.URL)
+}
+
+// itemsPageSize сколько товаров показывается в списке выбора.
+const itemsPageSize = 8
+
+// screenChooseItem список свободных товаров для выбора: tsk:it:<задание>:<стр>.
+func (a *App) screenChooseItem(ctx context.Context, l i18n.Lang, taskID int64, page int) (string, *models.InlineKeyboardMarkup, bool) {
+	if page < 0 {
+		page = 0
+	}
+	list, total, err := a.items.ListFree(ctx, itemsPageSize, page*itemsPageSize)
+	if err != nil {
+		a.log.Error("список свободных айтемов", "err", err)
+	}
+	id := itoa(taskID)
+	if total == 0 {
+		return i18n.T(l, "items_none"), kb(row(btn(i18n.T(l, "btn_back_list"), "tsk:v:"+id))), false
+	}
+	var rows [][]models.InlineKeyboardButton
+	for _, it := range list {
+		label := it.Title
+		if it.Price > 0 {
+			label += " · " + fmtMoney(it.Price)
+		}
+		rows = append(rows, row(btn(cut(label, 60), fmt.Sprintf("tsk:ii:%s:%d", id, it.ID))))
+	}
+	var nav []models.InlineKeyboardButton
+	if page > 0 {
+		nav = append(nav, btn("‹", fmt.Sprintf("tsk:it:%s:%d", id, page-1)))
+	}
+	if (page+1)*itemsPageSize < total {
+		nav = append(nav, btn("›", fmt.Sprintf("tsk:it:%s:%d", id, page+1)))
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
+	rows = append(rows, row(btn(i18n.T(l, "btn_back_list"), "tsk:v:"+id)))
+	return i18n.T(l, "items_head", total), kb(rows...), true
 }
 
 func (a *App) onTasksCommand(ctx context.Context, b *bot.Bot, upd *models.Update) {
@@ -138,6 +204,45 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 	case "rp":
 		a.startReport(ctx, b, u, cb, id)
 		return
+	case "it": // список свободных товаров: tsk:it:<задание>[:<стр>]
+		page := 0
+		if len(parts) > 3 {
+			page, _ = strconv.Atoi(parts[3])
+		}
+		text, markup, hasItems := a.screenChooseItem(ctx, l, id, page)
+		a.answerCB(ctx, b, cb.ID, "", false)
+		if !hasItems {
+			a.warnNoItems(ctx, b, card)
+		}
+		a.edit(ctx, b, cb, text, markup)
+		return
+	case "ii": // карточка товара: tsk:ii:<задание>:<товар>
+		itemID, _ := strconv.ParseInt(lastPart(parts), 10, 64)
+		it, err := a.items.Get(ctx, itemID)
+		a.answerCB(ctx, b, cb.ID, "", false)
+		if err != nil || it.Status != domain.ItemFree {
+			text, markup, _ := a.screenChooseItem(ctx, l, id, 0)
+			a.edit(ctx, b, cb, text, markup)
+			return
+		}
+		a.edit(ctx, b, cb, "🛒 "+itemText(it), kb(
+			row(btn(i18n.T(l, "btn_item_pick"), fmt.Sprintf("tsk:ip:%d:%d", id, it.ID))),
+			row(btn(i18n.T(l, "btn_back_items"), "tsk:it:"+itoa(id))),
+		))
+		return
+	case "ip": // выбрать товар: tsk:ip:<задание>:<товар>
+		itemID, _ := strconv.ParseInt(lastPart(parts), 10, 64)
+		if _, err := a.items.Choose(ctx, u.TgID, id, itemID); err != nil {
+			a.answerCB(ctx, b, cb.ID, errText(err), true)
+			text, markup, _ := a.screenChooseItem(ctx, l, id, 0)
+			a.edit(ctx, b, cb, text, markup)
+			return
+		}
+		a.log.Info("товар выбран", "user", maskID(u.TgID), "task", id, "item", itemID)
+		a.answerCB(ctx, b, cb.ID, i18n.T(l, "item_chosen"), false)
+		if got, err := a.tasks.Card(ctx, id); err == nil {
+			card = got
+		}
 	case "cf": // исправить данные отклонённой компенсации
 		a.startCompFix(ctx, b, u, cb, id)
 		return
@@ -182,6 +287,11 @@ func (a *App) onTaskCallback(ctx context.Context, b *bot.Bot, upd *models.Update
 			a.notifyCreator(ctx, b, card, "✅ принял задание", "срок до "+a.fmtTime(card.Task.DueAt))
 			if card.Promo == nil {
 				a.warnNoPromo(ctx, b, card)
+			}
+			if card.Version.Body.Kind != domain.KindSeller {
+				if st, err := a.items.Stats(ctx); err == nil && st.Free == 0 {
+					a.warnNoItems(ctx, b, card)
+				}
 			}
 		default:
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "task_declined"), true)
