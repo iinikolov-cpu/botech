@@ -44,7 +44,8 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	for i, s := range body.Steps {
 		fmt.Fprintf(&sb, "%d. %s\n", i+1, esc(s))
 	}
-	canHavePromo := t.Status == domain.TaskAccepted || t.Status == domain.TaskExpired
+	seller := body.Kind == domain.KindSeller // у продавца нет промокода, айтема и компенсации
+	canHavePromo := !seller && (t.Status == domain.TaskAccepted || t.Status == domain.TaskExpired)
 	switch {
 	case c.Promo != nil && c.Promo.Outcome == domain.PromoActive:
 		sb.WriteString("\n" + i18n.T(l, "promo_line", esc(c.Promo.Code)) + "\n")
@@ -58,7 +59,7 @@ func (a *App) renderBuyerTask(c *service.TaskCard) (string, *models.InlineKeyboa
 	case domain.TaskSent, domain.TaskCreated: // «создано» бывает только в момент доставки
 		rows = append(rows, row(btn(i18n.T(l, "btn_accept"), "tsk:ac:"+id), btn(i18n.T(l, "btn_decline"), "tsk:dc:"+id)))
 	case domain.TaskAccepted, domain.TaskExpired:
-		if c.Promo == nil {
+		if !seller && c.Promo == nil {
 			rows = append(rows, row(btn(i18n.T(l, "btn_get_promo"), "tsk:pc:"+id)))
 		}
 		rows = append(rows, row(btn(i18n.T(l, "btn_report"), "tsk:rp:"+id)))

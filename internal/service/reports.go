@@ -158,6 +158,9 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 			return err
 		}
 		if in.Comp != nil {
+			if ver.Body.Kind == domain.KindSeller {
+				return fmt.Errorf("%w: по заданию продавца компенсация не предусмотрена", ErrForbidden)
+			}
 			if in.Comp.Amount < 1 || in.Comp.Amount > MaxCompAmount {
 				return fmt.Errorf("%w: сумма должна быть от 1 до %d", ErrInvalidReport, MaxCompAmount)
 			}

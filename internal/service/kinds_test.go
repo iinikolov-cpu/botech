@@ -127,3 +127,43 @@ func TestImportKindImmutable(t *testing.T) {
 		t.Fatalf("новая версия: %v %v %v", r, p, err)
 	}
 }
+
+// Продавец: при принятии промокод не выдаётся (даже если коды есть), IssuePromo запрещён,
+// отчёт принимается без компенсации, а попытка приложить её отклоняется.
+func TestSellerHasNoPromoNoCompensation(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.addCodes(t, 3)
+	sc := e.importScenario(t, sellerYAML).Scenario
+	id := e.assignOne(t, sc.ID, 1)
+
+	card, changed, err := e.tasks.Accept(ctx, 1, id)
+	if err != nil || !changed {
+		t.Fatalf("принятие: %v", err)
+	}
+	if card.Promo != nil || card.PromoReason != PromoReasonNone {
+		t.Fatalf("продавцу промокод не выдаётся: %+v", card.Promo)
+	}
+	if st := e.stats(t); st.Busy != 0 || st.Available != 3 {
+		t.Fatalf("пул кодов не должен тронуться: %+v", st)
+	}
+	if _, err := e.tasks.IssuePromo(ctx, 1, id); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("IssuePromo для продавца: %v", err)
+	}
+
+	answers := []domain.Answer{{Key: "q_one", Value: "ок"}}
+	_, err = e.reports().Submit(ctx, 1, id, SubmitInput{
+		Answers: answers,
+		Comp:    &CompInput{Amount: 1000, ReceiptFileID: "R", ReceiptUniqueID: "RU"},
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("компенсация у продавца: %v", err)
+	}
+	res, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: answers})
+	if err != nil || res.Card.Comp != nil || res.PoolExhausted {
+		t.Fatalf("отчёт продавца: %+v %v", res, err)
+	}
+	if st := e.stats(t); st.Available != 3 || st.WithUsesLeft != 3 {
+		t.Fatalf("отчёт продавца не должен списывать промокод: %+v", st)
+	}
+}

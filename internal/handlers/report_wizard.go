@@ -64,6 +64,9 @@ func (a *App) startReport(ctx context.Context, b *bot.Bot, u *domain.User, cb *m
 	st, ok := a.loadReport(ctx, u.TgID)
 	if !ok || st.TaskID != taskID || st.CompOnly {
 		st = &reportState{TaskID: taskID, Phase: phaseQuestion}
+		if card, err := a.tasks.Card(ctx, taskID); err == nil && card.Version.Body.Kind == domain.KindSeller {
+			st.NoComp = true // у продавца нет компенсации
+		}
 		// После возврата на доработку сначала напоминаем, что просил исправить админ.
 		if card, err := a.tasks.Card(ctx, taskID); err == nil {
 			if card.Task.Status == domain.TaskRework && card.Report != nil && card.Report.AdminComment != "" {
@@ -191,7 +194,9 @@ func (a *App) reportSummary(l i18n.Lang, qs []domain.Question, st *reportState) 
 	for i, q := range qs {
 		fmt.Fprintf(&sb, "%d. %s: <b>%s</b>\n", i+1, esc(cut(q.Text, 80)), esc(a.answerText(l, byKey[q.Key])))
 	}
-	if st.WantComp {
+	if st.NoComp {
+		// у продавца компенсации нет, строку про неё не показываем
+	} else if st.WantComp {
 		sb.WriteString(i18n.T(l, "rpt_comp_line", fmtMoney(st.Amount)))
 	} else if st.KeepComp {
 		sb.WriteString(i18n.T(l, "rpt_comp_keep", fmtMoney(st.KeepAmount)))

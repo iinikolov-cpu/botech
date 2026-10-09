@@ -189,7 +189,11 @@ func (s *Tasks) byBuyer(ctx context.Context, userID, taskID int64, to domain.Tas
 	)
 	if to == domain.TaskAccepted {
 		// Промокод выдаётся в той же транзакции, что и принятие: либо оба действия, либо ни одного.
+		// Продавцу промокод на доставку не нужен.
 		hook = func(r storage.Repos, t *domain.Task, now time.Time) error {
+			if seller, err := isSellerTask(ctx, r, t); err != nil || seller {
+				return err
+			}
 			var err error
 			_, reason, err = issuePromo(ctx, r, t, s.promoMaxUses, now)
 			return err
@@ -204,6 +208,15 @@ func (s *Tasks) byBuyer(ctx context.Context, userID, taskID int64, to domain.Tas
 		card.PromoReason = reason
 	}
 	return card, changed, err
+}
+
+// isSellerTask true, если задание выдано по сценарию продавца (у него нет промокода, айтема и компенсации).
+func isSellerTask(ctx context.Context, r storage.Repos, t *domain.Task) (bool, error) {
+	v, err := r.Scenarios.GetVersion(ctx, t.ScenarioVersionID)
+	if err != nil {
+		return false, err
+	}
+	return v.Body.Kind == domain.KindSeller, nil
 }
 
 // issuePromo выдаёт заданию код из пула (если он ещё не выдан) и пишет событие в историю.
@@ -246,6 +259,11 @@ func (s *Tasks) IssuePromo(ctx context.Context, userID, taskID int64) (*TaskCard
 		}
 		if t.Status != domain.TaskAccepted && t.Status != domain.TaskExpired {
 			return fmt.Errorf("%w: промокод выдаётся принятым заданиям", ErrForbidden)
+		}
+		if seller, err := isSellerTask(ctx, r, t); err != nil {
+			return err
+		} else if seller {
+			return fmt.Errorf("%w: промокоды выдаются только заданиям покупателя", ErrForbidden)
 		}
 		_, reason, err = issuePromo(ctx, r, t, s.promoMaxUses, s.now().UTC())
 		return err

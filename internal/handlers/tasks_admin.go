@@ -201,7 +201,7 @@ func (a *App) screenTask(ctx context.Context, id int64) (string, *models.InlineK
 	t, body := c.Task, c.Version.Body
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<b>Задание #%d</b>\n", t.ID)
-	fmt.Fprintf(&sb, "Сценарий: %s (%s), версия %d\n", esc(body.Title), esc(body.Operator), c.Version.Version)
+	fmt.Fprintf(&sb, "Сценарий: %s (%s), версия %d, тип: %s\n", esc(body.Title), esc(body.Operator), c.Version.Version, body.Kind.Title())
 	fmt.Fprintf(&sb, "Покупатель: %s\n", userLabel(c.User))
 	fmt.Fprintf(&sb, "Статус: <b>%s</b>\n", t.Status.Title())
 	if w := a.waitNote(c); w != "" {

@@ -139,3 +139,46 @@ func TestAssignWizardFiltersByKind(t *testing.T) {
 		t.Fatalf("карточка пользователя: %q", got)
 	}
 }
+
+// Сценарий продавца целиком: без промокода и предупреждений о пуле, отчёт без шагов компенсации.
+func TestSellerFlowHasNoPromoOrCompensation(t *testing.T) {
+	e := newTestEnv(t)
+	e.addUserKinds(t, 2000, "Селлер", domain.KindSeller)
+	e.upload(testAdmin, "seller.yaml", sellerScenario)
+	e.assignTo(2000, 1)
+
+	e.click(2000, "tsk:ac:1")
+	card := e.tg.last()
+	if strings.Contains(card, "ромокод") {
+		t.Fatalf("у продавца нет промокода: %q", card)
+	}
+	if m, _ := e.tg.lastTo(2000); strings.Contains(m.Markup, "tsk:pc:") || !strings.Contains(m.Markup, "tsk:rp:1") {
+		t.Fatalf("кнопки продавца: %s", m.Markup)
+	}
+	if e.tg.anyTo(testAdmin, "ромокод") {
+		t.Fatal("админа не нужно предупреждать о промокодах для продавца")
+	}
+
+	e.click(2000, "tsk:rp:1")
+	e.press(t, 2000, "rpt:r:", ":5")
+	e.press(t, 2000, "rpt:s:", "") // необязательный комментарий пропускаем
+	m, _ := e.tg.lastTo(2000)
+	if !strings.Contains(m.Text, "Проверьте отчёт") || strings.Contains(m.Text, "омпенсац") {
+		t.Fatalf("после вопросов сразу итог без компенсации: %q", m.Text)
+	}
+	e.press(t, 2000, "rpt:ok:", "")
+	if !e.tg.anyTo(testAdmin, "Получен отчёт") || e.tg.anyTo(testAdmin, "омпенсац") {
+		t.Fatal("админ получает отчёт без строки о компенсации")
+	}
+	e.click(testAdmin, "adm:tc:1")
+	if got := e.tg.last(); !strings.Contains(got, "тип: продавец") || strings.Contains(got, "Промокод") || strings.Contains(got, "Компенсация") {
+		t.Fatalf("карточка задания продавца: %q", got)
+	}
+	if m, _ := e.tg.lastTo(testAdmin); strings.Contains(m.Markup, "adm:cc:") {
+		t.Fatalf("у продавца нет кнопки компенсации: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:cp:w:0")
+	if m, _ := e.tg.lastTo(testAdmin); strings.Contains(m.Markup, "adm:cc:") {
+		t.Fatalf("компенсаций у продавца быть не должно: %s", m.Markup)
+	}
+}
