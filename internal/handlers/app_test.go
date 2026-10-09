@@ -250,7 +250,7 @@ func (e *testEnv) addBuyer(t *testing.T, id int64, name string) {
 	t.Helper()
 	now := time.Now().UTC()
 	if err := e.store.Repos().Users.Create(context.Background(), &domain.User{
-		TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", FirstName: name, CreatedAt: now, UpdatedAt: now,
+		TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", FirstName: name, Kinds: domain.AllKinds, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}

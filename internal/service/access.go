@@ -262,6 +262,30 @@ func (a *Access) ActiveInvites(ctx context.Context) ([]*domain.Invite, error) {
 	return a.store.Repos().Invites.ListActive(ctx, 20)
 }
 
+// SetKinds сохраняет, какие типы заданий пользователь готов делать (хотя бы один).
+func (a *Access) SetKinds(ctx context.Context, userID int64, kinds []domain.TaskKind) error {
+	kinds = domain.ParseKinds(domain.JoinKinds(kinds)) // убирает повторы и неизвестные значения
+	if len(kinds) == 0 {
+		return fmt.Errorf("%w: выберите хотя бы один тип заданий", ErrForbidden)
+	}
+	err := a.store.Repos().Users.SetKinds(ctx, userID, kinds, a.now().UTC())
+	if errors.Is(err, storage.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
+}
+
+// UsersForKind активные покупатели, готовые делать задания этого типа (для мастера назначения).
+func (a *Access) UsersForKind(ctx context.Context, kind domain.TaskKind, limit, offset int) ([]*domain.User, int, error) {
+	r := a.store.Repos()
+	list, err := r.Users.ListForKind(ctx, domain.StatusActive, kind, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := r.Users.CountForKind(ctx, domain.StatusActive, kind)
+	return list, total, err
+}
+
 // Users список пользователей с фильтрами и страницей.
 func (a *Access) Users(ctx context.Context, role domain.Role, status domain.UserStatus, limit, offset int) ([]*domain.User, int, error) {
 	r := a.store.Repos()

@@ -73,7 +73,7 @@ func (a *App) assignCallback(ctx context.Context, b *bot.Bot, admin *domain.User
 		t, m := a.screenAssignBuyers(ctx, st, p)
 		return t, m, ""
 	case "all":
-		list, _, err := a.access.Users(ctx, domain.RoleBuyer, domain.StatusActive, 500, 0)
+		list, _, err := a.access.UsersForKind(ctx, a.scenarioKind(ctx, st.ScenarioID), 500, 0)
 		if err != nil {
 			a.log.Error("выбор всех покупателей", "err", err)
 		}
@@ -118,7 +118,7 @@ func (a *App) screenAssignScenarios(ctx context.Context) (string, *models.Inline
 	}
 	var rows [][]models.InlineKeyboardButton
 	for _, s := range list {
-		rows = append(rows, row(btn(cut(fmt.Sprintf("%s · %s", s.Title, s.Operator), 60), "adm:as:s:"+itoa(s.ID))))
+		rows = append(rows, row(btn(cut(fmt.Sprintf("%s · %s · %s", s.Title, s.Operator, s.Kind.Title()), 60), "adm:as:s:"+itoa(s.ID))))
 	}
 	rows = append(rows, row(btn("Отмена", "adm:as:x")))
 	return "<b>Назначение задания</b>\nШаг 1 из 3: выберите сценарий.", kb(rows...)
@@ -141,7 +141,8 @@ func (a *App) screenAssignBuyers(ctx context.Context, st assignState, page int) 
 	if page < 0 {
 		page = 0
 	}
-	list, total, err := a.access.Users(ctx, domain.RoleBuyer, domain.StatusActive, pageSize, page*pageSize)
+	kind := a.scenarioKind(ctx, st.ScenarioID)
+	list, total, err := a.access.UsersForKind(ctx, kind, pageSize, page*pageSize)
 	if err != nil {
 		a.log.Error("список покупателей для назначения", "err", err)
 	}
@@ -187,7 +188,9 @@ func (a *App) screenAssignBuyers(ctx context.Context, st assignState, page int) 
 	text := fmt.Sprintf("<b>Назначение задания</b>\nСценарий: %s\nСрок: %d дн. после принятия\n\nШаг 3 из 3: отметьте покупателей (выбрано: %d).",
 		esc(title), st.Days, len(st.Selected))
 	if total == 0 {
-		text += "\n\nАктивных покупателей пока нет."
+		text += fmt.Sprintf("\n\nПодходящих пользователей нет: никто из активных не выбрал тип заданий «%s».", kind.Title())
+	} else {
+		text += fmt.Sprintf("\nПоказаны только те, кто выбрал тип «%s».", kind.Title())
 	}
 	return text, kb(rows...)
 }
@@ -225,10 +228,21 @@ func (a *App) assignExecute(ctx context.Context, b *bot.Bot, admin *domain.User,
 	if len(res.Repeat) > 0 {
 		fmt.Fprintf(&sb, "\nℹ У них уже было незавершённое задание по этому сценарию, выдано ещё одно (%d): %s\n", len(res.Repeat), esc(a.names(ctx, res.Repeat)))
 	}
+	if len(res.WrongKind) > 0 {
+		fmt.Fprintf(&sb, "\n⛔ Не выдано: пользователь не выбрал этот тип заданий (%d): %s\n", len(res.WrongKind), esc(a.names(ctx, res.WrongKind)))
+	}
 	if len(res.Invalid) > 0 {
-		fmt.Fprintf(&sb, "\nНедоступны (заблокированы или не покупатели) (%d): %s\n", len(res.Invalid), esc(a.names(ctx, res.Invalid)))
+		fmt.Fprintf(&sb, "\nНедоступны (заблокированы или не исполнители) (%d): %s\n", len(res.Invalid), esc(a.names(ctx, res.Invalid)))
 	}
 	return sb.String(), kb(row(btn("📌 К заданиям", "adm:tk:a:0"), btn("« В меню", "adm:home"))), ""
+}
+
+// scenarioKind тип сценария (покупатель, если сценарий не найден).
+func (a *App) scenarioKind(ctx context.Context, scenarioID int64) domain.TaskKind {
+	if sc, _, err := a.scenarios.Get(ctx, scenarioID); err == nil && sc.Kind.Valid() {
+		return sc.Kind
+	}
+	return domain.KindBuyer
 }
 
 func (a *App) nameOf(ctx context.Context, id int64) string {

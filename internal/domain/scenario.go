@@ -32,6 +32,7 @@ type Question struct {
 
 // ScenarioBody полное содержимое версии сценария (хранится JSON-ом).
 type ScenarioBody struct {
+	Kind      TaskKind   `json:"kind,omitempty"` // пусто в старых версиях: считается «покупатель»
 	Title     string     `json:"title"`
 	Operator  string     `json:"operator"`
 	City      string     `json:"city,omitempty"`
@@ -44,6 +45,7 @@ type ScenarioBody struct {
 type Scenario struct {
 	ID            int64
 	Key           string
+	Kind          TaskKind // тип сценария, задаётся при создании и не меняется
 	Title         string
 	Operator      string
 	Archived      bool

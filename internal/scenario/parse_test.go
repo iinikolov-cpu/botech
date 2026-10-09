@@ -84,3 +84,52 @@ func TestParseTooBig(t *testing.T) {
 		t.Fatal("слишком большой файл должен отклоняться")
 	}
 }
+
+func TestParseKind(t *testing.T) {
+	const base = `key: abc-1
+title: T
+operator: O
+steps: [a]
+questions:
+  - {key: q_one, text: Q, type: text}
+`
+	tests := []struct {
+		name string
+		kind string // строка, добавляемая в файл
+		want domain.TaskKind
+		err  string
+	}{
+		{"нет поля: покупатель", "", domain.KindBuyer, ""},
+		{"покупатель", "kind: buyer\n", domain.KindBuyer, ""},
+		{"продавец", "kind: seller\n", domain.KindSeller, ""},
+		{"регистр и пробелы", "kind: ' Seller '\n", domain.KindSeller, ""},
+		{"неизвестный тип", "kind: courier\n", "", "kind:"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, errs := Parse([]byte(tc.kind + base))
+			if tc.err != "" {
+				if len(errs) == 0 || !strings.Contains(strings.Join(errs, "|"), tc.err) {
+					t.Fatalf("ожидали ошибку %q, получили %v", tc.err, errs)
+				}
+				return
+			}
+			if len(errs) > 0 || p.Body.Kind != tc.want {
+				t.Fatalf("kind = %v, ошибки %v; ожидали %v", p, errs, tc.want)
+			}
+		})
+	}
+}
+
+func TestSellerTemplateIsValid(t *testing.T) {
+	p, errs := Parse(TemplateSeller)
+	if len(errs) > 0 {
+		t.Fatalf("шаблон продавца должен проходить проверку: %v", errs)
+	}
+	if p.Body.Kind != domain.KindSeller {
+		t.Fatalf("тип шаблона продавца: %v", p.Body.Kind)
+	}
+	if b, _ := Parse(Template); b == nil || b.Body.Kind != domain.KindBuyer {
+		t.Fatal("шаблон покупателя должен иметь тип buyer")
+	}
+}

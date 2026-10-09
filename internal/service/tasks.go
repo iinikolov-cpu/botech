@@ -58,8 +58,13 @@ type TaskCard struct {
 type AssignResult struct {
 	Created []*domain.Task
 	Repeat  []int64 // у этих покупателей уже было незавершённое задание по этому сценарию (выдано ещё одно)
-	Invalid []int64 // нет такого активного покупателя
+	Invalid []int64 // нет такого активного пользователя
+	// WrongKind: пользователь не выбрал тип заданий этого сценария (покупатель/продавец), задание ему не выдано.
+	WrongKind []int64
 }
+
+// errWrongKind пользователь не выбрал тип заданий, к которому относится сценарий (внутренняя).
+var errWrongKind = errors.New("тип задания не выбран пользователем")
 
 // activeStatuses незавершённые задания.
 var activeStatuses = []domain.TaskStatus{domain.TaskCreated, domain.TaskSent, domain.TaskAccepted, domain.TaskExpired, domain.TaskRework}
@@ -103,6 +108,9 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 			if err != nil {
 				return err
 			}
+			if !u.CanDo(sc.Kind) {
+				return errWrongKind
+			}
 			// Повторное назначение того же сценария разрешено, но админу сообщаем о нём.
 			n, err := r.Tasks.Count(ctx, storage.TaskFilter{UserID: uid, ScenarioID: scenarioID, Statuses: activeStatuses})
 			if err != nil {
@@ -134,6 +142,8 @@ func (s *Tasks) Assign(ctx context.Context, actor, scenarioID int64, dueDays int
 			if repeat {
 				res.Repeat = append(res.Repeat, uid)
 			}
+		case errors.Is(err, errWrongKind):
+			res.WrongKind = append(res.WrongKind, uid)
 		case errors.Is(err, ErrNotFound):
 			res.Invalid = append(res.Invalid, uid)
 		default:

@@ -97,6 +97,7 @@ func (a *App) screenBuyerTasks(ctx context.Context, u *domain.User) (string, *mo
 		label := fmt.Sprintf("#%d %s · %s", c.Task.ID, c.Version.Body.Title, c.Task.Status.Title())
 		rows = append(rows, row(btn(cut(label, 60), "tsk:v:"+itoa(c.Task.ID))))
 	}
+	rows = append(rows, row(btn(i18n.T(l, "btn_kinds"), "kd:s:"+itoa(int64(kindsMask(u.Kinds))))))
 	return i18n.T(l, "tasks_title"), kb(rows...)
 }
 

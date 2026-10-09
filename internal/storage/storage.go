@@ -24,6 +24,11 @@ type UserRepo interface {
 	List(ctx context.Context, role domain.Role, status domain.UserStatus, limit, offset int) ([]*domain.User, error)
 	Count(ctx context.Context, role domain.Role, status domain.UserStatus) (int, error)
 	ListActiveAdmins(ctx context.Context) ([]*domain.User, error)
+	// SetKinds записывает типы заданий, которые пользователь готов делать.
+	SetKinds(ctx context.Context, tgID int64, kinds []domain.TaskKind, at time.Time) error
+	// ListForKind и CountForKind: пользователи роли buyer с данным статусом, готовые делать задания этого типа.
+	ListForKind(ctx context.Context, status domain.UserStatus, kind domain.TaskKind, limit, offset int) ([]*domain.User, error)
+	CountForKind(ctx context.Context, status domain.UserStatus, kind domain.TaskKind) (int, error)
 }
 
 // InviteRepo работа с инвайтами.

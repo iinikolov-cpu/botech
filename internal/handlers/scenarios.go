@@ -41,11 +41,15 @@ func (a *App) scenarioCallback(ctx context.Context, b *bot.Bot, admin *domain.Us
 			a.log.Error("архивация сценария", "err", err)
 		}
 		return a.screenScenario(ctx, id())
-	case "sct":
+	case "sct": // adm:sct (покупатель) или adm:sct:s (продавец)
+		name, data, kind := "scenario_template_buyer.yaml", scenario.Template, domain.KindBuyer
+		if len(parts) > 2 && parts[2] == "s" {
+			name, data, kind = "scenario_template_seller.yaml", scenario.TemplateSeller, domain.KindSeller
+		}
 		_, err := b.SendDocument(ctx, &bot.SendDocumentParams{
 			ChatID:   admin.TgID,
-			Document: &models.InputFileUpload{Filename: "scenario_template.yaml", Data: bytes.NewReader(scenario.Template)},
-			Caption:  "Шаблон сценария. Заполните и отправьте файл обратно в этот чат.",
+			Document: &models.InputFileUpload{Filename: name, Data: bytes.NewReader(data)},
+			Caption:  "Шаблон сценария (" + kind.Title() + "). Заполните и отправьте файл обратно в этот чат.",
 		})
 		if err != nil {
 			a.log.Error("отправка шаблона", "err", err)
@@ -64,12 +68,12 @@ func (a *App) screenScenarios(ctx context.Context) (string, *models.InlineKeyboa
 	sb.WriteString("<b>Сценарии</b>\n\n" +
 		"Чтобы <b>добавить</b> или <b>обновить</b> сценарий, отправьте файл (.yaml, .yml или .json) прямо в этот чат. " +
 		"Если ключ (key) уже есть, создастся новая версия, а выданные задания продолжат работать по старой.\n")
-	rows := [][]models.InlineKeyboardButton{row(btn("📄 Скачать шаблон", "adm:sct"))}
+	rows := [][]models.InlineKeyboardButton{row(btn("📄 Шаблон покупателя", "adm:sct"), btn("📄 Шаблон продавца", "adm:sct:s"))}
 	if len(list) == 0 {
 		sb.WriteString("\nСценариев пока нет.")
 	}
 	for _, s := range list {
-		label := fmt.Sprintf("%s · %s · v%d", s.Title, s.Operator, s.LatestVersion)
+		label := fmt.Sprintf("%s · %s · %s · v%d", s.Title, s.Operator, s.Kind.Title(), s.LatestVersion)
 		if s.Archived {
 			label = "🗄 " + label
 		}
@@ -86,7 +90,7 @@ func (a *App) screenScenario(ctx context.Context, id int64) (string, *models.Inl
 	}
 	body := v.Body
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "<b>%s</b>\nОператор: %s\n", esc(body.Title), esc(body.Operator))
+	fmt.Fprintf(&sb, "<b>%s</b>\nТип: %s\nОператор: %s\n", esc(body.Title), sc.Kind.Title(), esc(body.Operator))
 	if body.City != "" {
 		fmt.Fprintf(&sb, "Город: %s\n", esc(body.City))
 	}

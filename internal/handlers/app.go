@@ -78,6 +78,7 @@ func (a *App) Register(b *bot.Bot, username string) {
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "adm:", bot.MatchTypePrefix, a.adminOnly(a.onAdminCallback))
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "tsk:", bot.MatchTypePrefix, a.onTaskCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "rpt:", bot.MatchTypePrefix, a.onReportCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "kd:", bot.MatchTypePrefix, a.onKindsCallback)
 	// Файлы сценариев (документы) принимаем только от админов.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.Message != nil && u.Message.Document != nil
@@ -183,6 +184,16 @@ func (a *App) Middleware(next bot.HandlerFunc) bot.HandlerFunc {
 			return
 		}
 		a.access.TouchProfile(ctx, u, service.Profile{TgID: from.ID, FirstName: from.FirstName, Username: from.Username})
+		// Пока исполнитель не выбрал, какие задания готов делать, кроме выбора ничего не показываем.
+		if u.Role == domain.RoleBuyer && len(u.Kinds) == 0 && !(upd.CallbackQuery != nil && strings.HasPrefix(upd.CallbackQuery.Data, "kd:")) {
+			if upd.CallbackQuery != nil {
+				a.answerCB(ctx, b, upd.CallbackQuery.ID, "", false)
+			} else {
+				a.eat(ctx, b, upd.Message)
+			}
+			a.askKinds(ctx, b, u)
+			return
+		}
 		next(withUser(ctx, u), b, upd)
 	}
 }
@@ -269,7 +280,9 @@ func (a *App) onStart(ctx context.Context, b *bot.Bot, upd *models.Update) {
 		text += i18n.T(lang(u), "help_admin")
 	}
 	a.eat(ctx, b, upd.Message)
-	a.sendPanel(ctx, b, u.TgID, text, kb(row(btn(i18n.T(lang(u), "btn_tasks"), "tsk:l"))))
+	a.sendPanel(ctx, b, u.TgID, text, kb(
+		row(btn(i18n.T(lang(u), "btn_tasks"), "tsk:l")),
+		row(btn(i18n.T(lang(u), "btn_kinds"), "kd:s:"+itoa(int64(kindsMask(u.Kinds)))))))
 }
 
 func (a *App) onHelp(ctx context.Context, b *bot.Bot, upd *models.Update) {

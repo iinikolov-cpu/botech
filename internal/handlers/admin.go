@@ -225,6 +225,9 @@ func (a *App) screenUser(ctx context.Context, id int64) (string, *models.InlineK
 	}
 	text := fmt.Sprintf("%s\nСтатус: %s\nВ системе с: %s",
 		userLabel(u), statusTitle[u.Status], a.fmtTime(u.CreatedAt))
+	if u.Role == domain.RoleBuyer {
+		text += "\nТипы заданий: " + u.KindsTitle()
+	}
 	var actions []models.InlineKeyboardButton
 	if u.Role == domain.RoleBuyer {
 		switch u.Status {

@@ -48,7 +48,7 @@ func newEnvUses(t *testing.T, promoUses int) *env {
 	for id := int64(1); id <= 3; id++ {
 		now := time.Now().UTC()
 		if err := store.Repos().Users.Create(ctx, &domain.User{
-			TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", CreatedAt: now, UpdatedAt: now,
+			TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", Kinds: domain.AllKinds, CreatedAt: now, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}

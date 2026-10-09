@@ -46,7 +46,7 @@ func (s *Scenarios) Import(ctx context.Context, actor int64, data []byte) (res *
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 			sc = &domain.Scenario{
-				Key: parsed.Key, Title: parsed.Body.Title, Operator: parsed.Body.Operator,
+				Key: parsed.Key, Kind: parsed.Body.Kind, Title: parsed.Body.Title, Operator: parsed.Body.Operator,
 				CreatedBy: actor, CreatedAt: now, UpdatedAt: now,
 			}
 			if err := r.Scenarios.Create(ctx, sc); err != nil {
@@ -56,6 +56,11 @@ func (s *Scenarios) Import(ctx context.Context, actor int64, data []byte) (res *
 		case err != nil:
 			return err
 		default:
+			if sc.Kind != parsed.Body.Kind {
+				validation = []string{fmt.Sprintf("kind: у сценария %q тип «%s», поменять его на «%s» нельзя. Для другого типа создайте сценарий с новым key",
+					sc.Key, sc.Kind.Title(), parsed.Body.Kind.Title())}
+				return nil
+			}
 			last, err := r.Scenarios.LatestVersion(ctx, sc.ID)
 			if err != nil {
 				return err
@@ -87,6 +92,9 @@ func (s *Scenarios) Import(ctx context.Context, actor int64, data []byte) (res *
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(validation) > 0 {
+		return nil, validation, nil
 	}
 	return res, nil, nil
 }

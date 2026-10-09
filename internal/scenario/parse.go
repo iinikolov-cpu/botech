@@ -14,10 +14,14 @@ import (
 	"botech/internal/domain"
 )
 
-// Template пример файла сценария, его бот отправляет админу по кнопке.
+// Template пример файла сценария тайного покупателя, TemplateSeller тайного продавца.
+// Бот отправляет их админу по кнопкам.
 //
 //go:embed template.yaml
 var Template []byte
+
+//go:embed template_seller.yaml
+var TemplateSeller []byte
 
 // Ограничения: инструкция и вопросы должны помещаться в сообщения Telegram.
 const (
@@ -38,6 +42,7 @@ var (
 // file структура файла сценария. required задаётся указателем, чтобы отличить «не указано» от false.
 type file struct {
 	Key       string   `yaml:"key"`
+	Kind      string   `yaml:"kind"`
 	Title     string   `yaml:"title"`
 	Operator  string   `yaml:"operator"`
 	City      string   `yaml:"city"`
@@ -79,6 +84,13 @@ func Parse(data []byte) (*Parsed, []string) {
 	key := strings.TrimSpace(f.Key)
 	if !keyRe.MatchString(key) {
 		add("key: нужна латиница в нижнем регистре, цифры, - и _ (3-40 символов)")
+	}
+	kind := domain.TaskKind(strings.ToLower(strings.TrimSpace(f.Kind)))
+	switch {
+	case kind == "": // старые файлы без поля: сценарий покупателя
+		kind = domain.KindBuyer
+	case !kind.Valid():
+		add("kind: допустимо buyer (покупатель) или seller (продавец), указано %q", f.Kind)
 	}
 	title, operator := strings.TrimSpace(f.Title), strings.TrimSpace(f.Operator)
 	switch {
@@ -159,7 +171,7 @@ func Parse(data []byte) (*Parsed, []string) {
 	return &Parsed{
 		Key: key,
 		Body: domain.ScenarioBody{
-			Title: title, Operator: operator,
+			Kind: kind, Title: title, Operator: operator,
 			City: strings.TrimSpace(f.City), PVZ: strings.TrimSpace(f.PVZ),
 			Steps: steps, Questions: questions,
 		},

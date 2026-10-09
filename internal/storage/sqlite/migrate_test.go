@@ -147,3 +147,60 @@ func TestMigrationPromoReusable(t *testing.T) {
 		t.Errorf("история выдачи активного кода: %q %v", outcome, err)
 	}
 }
+
+// Миграция 0008: старые сценарии остаются покупательскими, у пользователей типы не выбраны,
+// версии без поля kind читаются как «покупатель», таблица айтемов работает.
+func TestMigrationKindsAndItems(t *testing.T) {
+	ctx := context.Background()
+	s, err := openRaw(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.applyMigrations(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	db := s.DB()
+	for _, q := range []string{
+		`INSERT INTO users (tg_id, role, status, created_at, updated_at) VALUES (1,'buyer','active',1,1)`,
+		`INSERT INTO scenarios (id, key, title, operator, created_by, created_at, updated_at) VALUES (1,'k','T','O',1,1,1)`,
+		`INSERT INTO scenario_versions (id, scenario_id, version, body, created_by, created_at) VALUES (1,1,1,'{"title":"T","operator":"O"}',1,1)`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := s.applyMigrations(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	r := s.Repos()
+	u, err := r.Users.Get(ctx, 1)
+	if err != nil || len(u.Kinds) != 0 {
+		t.Fatalf("у старого пользователя типы не выбраны: %v %v", u, err)
+	}
+	sc, err := r.Scenarios.GetByID(ctx, 1)
+	if err != nil || sc.Kind != "buyer" {
+		t.Fatalf("старый сценарий покупательский: %v %v", sc, err)
+	}
+	v, err := r.Scenarios.LatestVersion(ctx, 1)
+	if err != nil || v.Body.Kind != "buyer" {
+		t.Fatalf("старая версия читается как покупатель: %v %v", v, err)
+	}
+	// Одно задание: не больше одного айтема; свободные айтемы (task_id = 0) не конфликтуют.
+	for _, q := range []string{
+		`INSERT INTO items (title, url, added_by, created_at) VALUES ('a','https://x/1',1,1)`,
+		`INSERT INTO items (title, url, added_by, created_at) VALUES ('b','https://x/2',1,1)`,
+		`UPDATE items SET task_id = 5, status = 'reserved' WHERE url = 'https://x/1'`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE items SET task_id = 5, status = 'reserved' WHERE url = 'https://x/2'`); err == nil {
+		t.Fatal("два айтема на одно задание должны быть запрещены")
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO items (title, url, added_by, created_at) VALUES ('dup','https://x/1',1,1)`); err == nil {
+		t.Fatal("дубль ссылки должен быть запрещён")
+	}
+}

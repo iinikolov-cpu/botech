@@ -44,7 +44,7 @@ func (e *env) addBuyers(t *testing.T, from, to int64) {
 	for id := from; id <= to; id++ {
 		now := time.Now().UTC()
 		if err := e.store.Repos().Users.Create(context.Background(), &domain.User{
-			TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", CreatedAt: now, UpdatedAt: now,
+			TgID: id, Role: domain.RoleBuyer, Status: domain.StatusActive, Lang: "ru", Kinds: domain.AllKinds, CreatedAt: now, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
