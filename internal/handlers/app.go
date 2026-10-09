@@ -71,6 +71,9 @@ func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 // Register регистрирует маршруты. Имена команд задаются БЕЗ слеша (так требует библиотека). Middleware доступа подключается отдельно (Middleware()).
 func (a *App) Register(b *bot.Bot, username string) {
 	a.botUsername = username
+	if a.analytics != nil {
+		a.analytics.SetBotUsername(username) // для ссылок на медиа в выгрузках
+	}
 	b.RegisterHandler(bot.HandlerTypeMessageText, "start", bot.MatchTypeCommandStartOnly, a.onStart)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, a.onHelp)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "admin", bot.MatchTypeCommand, a.adminOnly(a.onAdmin))
@@ -288,6 +291,14 @@ func (a *App) onStart(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	u := userFrom(ctx)
 	if u == nil || upd.Message == nil {
 		return
+	}
+	// Ссылка на медиа из CSV (https://t.me/бот?start=m<отчёт>x<вопрос>): только админу, бот присылает файл.
+	if u.IsAdmin() {
+		if reportID, key, ok := parseMediaPayload(startPayload(upd.Message.Text)); ok {
+			a.eat(ctx, b, upd.Message)
+			a.sendReportMedia(ctx, b, u, reportID, key)
+			return
+		}
 	}
 	text := i18n.T(lang(u), "welcome_buyer", esc(u.FirstName))
 	if u.IsAdmin() {

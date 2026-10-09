@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"botech/internal/storage"
 )
 
 // Команда /admin дважды: старое меню и сама команда удаляются, в чате остаётся одно меню.
@@ -119,32 +122,55 @@ func TestTaskListMarks(t *testing.T) {
 	}
 }
 
-// Статистика и выгрузки доступны админу, покупателю нет.
+// Статистика по вкладкам «Покупатели» и «Продавцы», выгрузка по всем сценариям; покупателю недоступно.
 func TestStatsAndExportScreens(t *testing.T) {
 	e := newTestEnv(t)
 	e.addBuyer(t, 2000, "Алия")
 	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.upload(testAdmin, "seller.yaml", sellerScenario)
 	e.assignTo(2000, 1)
 	e.click(2000, "tsk:ac:1")
 	e.completeReportWithComp(t, 2000, 1, "50000")
+	e.assignTo(2000, 2) // задание продавца #2
+	e.click(2000, "tsk:ac:2")
+	e.click(2000, "tsk:rp:2")
+	e.press(t, 2000, "rpt:r:", ":4")
+	e.press(t, 2000, "rpt:s:", "")
+	e.press(t, 2000, "rpt:ok:", "")
 
 	e.click(testAdmin, "adm:home")
-	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Markup, "adm:sx:m") {
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Markup, "adm:sx:m:b") {
 		t.Fatalf("нет кнопки статистики: %s", m.Markup)
 	}
-	e.click(testAdmin, "adm:sx:m")
+	e.click(testAdmin, "adm:sx:m:b")
 	got := e.tg.last()
-	for _, want := range []string{"Статистика", "Отчётов получено: <b>1</b>", "BTS", "средняя оценка", "К выплате: 1 (50 000 сум)"} {
+	for _, want := range []string{"Статистика: покупатели", "Отчётов получено: <b>1</b>", "BTS", "Товаров выбрано: 1, куплено: 1", "К выплате: 1 (50 000 сум)"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("в статистике нет %q: %q", want, got)
+			t.Fatalf("в статистике покупателей нет %q: %q", want, got)
 		}
 	}
-	e.click(testAdmin, "adm:sx:w")
+	if strings.Contains(got, "средняя оценка") || strings.Contains(got, "Оценка сервиса") {
+		t.Fatalf("сводных оценок по вопросам в статистике быть не должно: %q", got)
+	}
+	m, _ := e.tg.lastTo(testAdmin)
+	if !strings.Contains(m.Markup, "adm:sx:m:s") || !strings.Contains(m.Markup, "adm:sx:w:b") {
+		t.Fatalf("вкладки и период: %s", m.Markup)
+	}
+	e.click(testAdmin, "adm:sx:m:s")
+	got = e.tg.last()
+	if !strings.Contains(got, "Статистика: продавцы") || !strings.Contains(got, "Отчётов получено: <b>1</b>") || !strings.Contains(got, "EMU") ||
+		strings.Contains(got, "Компенсации") || strings.Contains(got, "Товаров") {
+		t.Fatalf("статистика продавцов: %q", got)
+	}
+	e.click(testAdmin, "adm:sx:w:s")
 	e.click(testAdmin, "adm:ex:a")
-	if got := e.tg.last(); !strings.Contains(got, "Выгрузка в CSV") {
+	if got := e.tg.last(); !strings.Contains(got, "Выгрузка в CSV") || !strings.Contains(got, "сразу по всем сценариям") {
 		t.Fatalf("меню выгрузки: %q", got)
 	}
-	for _, d := range []string{"adm:exd:a:t", "adm:exd:a:c", "adm:exd:a:s:1", "adm:exd:a:a"} {
+	if m, _ := e.tg.lastTo(testAdmin); strings.Contains(m.Markup, "adm:exs") {
+		t.Fatalf("выбора сценария для выгрузки больше нет: %s", m.Markup)
+	}
+	for _, d := range []string{"adm:exd:a:t", "adm:exd:a:c", "adm:exd:a:r", "adm:exd:a:a"} {
 		e.click(testAdmin, d)
 		if got := e.tg.lastAnswer(); got != "Файл отправлен" {
 			t.Fatalf("%s: %q", d, got)
@@ -158,17 +184,61 @@ func TestStatsAndExportScreens(t *testing.T) {
 		}
 	}
 	e.tg.mu.Unlock()
-	if len(files) != 4 {
+	if len(files) != 4 || !strings.HasPrefix(files[2], "reports-") {
 		t.Fatalf("отправлено CSV: %v", files)
 	}
-	e.click(testAdmin, "adm:exs:a")
-	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Markup, "adm:exd:a:s:1") {
-		t.Fatalf("выбор сценария: %s", m.Markup)
-	}
 	// Покупателю недоступно.
-	e.click(2000, "adm:sx:m")
+	e.click(2000, "adm:sx:m:b")
 	if got := e.tg.lastAnswer(); got != "Нет доступа." {
 		t.Fatalf("статистика у покупателя: %q", got)
+	}
+}
+
+// Ссылка на медиа из выгрузки: бот присылает файл только админу.
+func TestMediaDeepLink(t *testing.T) {
+	e := newTestEnv(t)
+	e.addBuyer(t, 2000, "Алия")
+	e.upload(testAdmin, "s.yaml", reportFlowScenario)
+	e.assignTo(2000, 1)
+	e.click(2000, "tsk:ac:1")
+	e.completeReportWithComp(t, 2000, 1, "50000")
+
+	rows, err := e.app.analytics.Rows(context.Background(), storage.ExportFilter{})
+	if err != nil || len(rows) != 1 || rows[0].ReportID == 0 {
+		t.Fatalf("строки выгрузки: %v %v", rows, err)
+	}
+	link := fmt.Sprintf("m%dxphoto", rows[0].ReportID)
+	data, _ := e.app.analytics.AnswersCSV(context.Background(), rows)
+	if !strings.Contains(string(data), "https://t.me/testbot?start="+link) {
+		t.Fatalf("в выгрузке нет ссылки на медиа: %s", data)
+	}
+
+	before := len(e.tg.methodsTo(testAdmin))
+	e.say(testAdmin, "/start "+link)
+	ms := e.tg.methodsTo(testAdmin)[before:]
+	if len(ms) != 1 || ms[0] != "sendPhoto" {
+		t.Fatalf("админ должен получить фото, получил %v", ms)
+	}
+	if m, _ := e.tg.lastTo(testAdmin); !strings.Contains(m.Text, "Задание #1") || !strings.Contains(m.Text, "Фото посылки") {
+		t.Fatalf("подпись: %q", m.Text)
+	}
+	// Несуществующий отчёт или вопрос: понятный ответ.
+	e.say(testAdmin, "/start m999xphoto")
+	if got := e.tg.last(); !strings.Contains(got, "Отчёт не найден") {
+		t.Fatalf("нет отчёта: %q", got)
+	}
+	e.say(testAdmin, "/start "+fmt.Sprintf("m%dxnope", rows[0].ReportID))
+	if got := e.tg.last(); !strings.Contains(got, "нет такого файла") {
+		t.Fatalf("нет файла: %q", got)
+	}
+	// Покупатель по такой ссылке получает обычное приветствие, а не файл.
+	before = len(e.tg.methodsTo(2000))
+	e.say(2000, "/start "+link)
+	if ms := e.tg.methodsTo(2000)[before:]; len(ms) != 1 || ms[0] != "sendMessage" {
+		t.Fatalf("покупатель не должен получать медиа: %v", ms)
+	}
+	if got := e.tg.last(); !strings.Contains(got, "Здравствуйте") {
+		t.Fatalf("приветствие: %q", got)
 	}
 }
 

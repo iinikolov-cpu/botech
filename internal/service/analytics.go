@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"botech/internal/domain"
@@ -18,6 +19,9 @@ import (
 type Analytics struct {
 	store storage.Store
 	loc   *time.Location
+
+	mu  sync.RWMutex
+	bot string // username бота: нужен для ссылок на медиа в выгрузке
 }
 
 // NewAnalytics создаёт сервис. loc: часовой пояс для дат в выгрузках.
@@ -25,14 +29,17 @@ func NewAnalytics(store storage.Store, loc *time.Location) *Analytics {
 	return &Analytics{store: store, loc: loc}
 }
 
-// QuestionStat итог по одному вопросу у оператора.
-type QuestionStat struct {
-	Key   string
-	Text  string
-	Type  domain.QuestionType
-	N     int     // сколько ответов учтено
-	Avg   float64 // средняя оценка (для rating)
-	YesPc float64 // доля «да» в процентах (для yesno)
+// SetBotUsername запоминает username бота (без @) для ссылок вида https://t.me/<бот>?start=...
+func (a *Analytics) SetBotUsername(name string) {
+	a.mu.Lock()
+	a.bot = strings.TrimPrefix(strings.TrimSpace(name), "@")
+	a.mu.Unlock()
+}
+
+func (a *Analytics) botName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.bot
 }
 
 // OperatorStat итог по оператору.
@@ -42,13 +49,13 @@ type OperatorStat struct {
 	Completed int
 	Overdue   int
 	AvgTime   time.Duration // от принятия до отчёта
-	Questions []QuestionStat
 }
 
-// Stats общая статистика за период.
+// Stats статистика за период по одному типу заданий (покупатели или продавцы).
 type Stats struct {
+	Kind      domain.TaskKind
 	Total     int // всего заданий
-	Issued    int // доставлено покупателям
+	Issued    int // доставлено исполнителям
 	Accepted  int
 	Declined  int
 	Cancelled int
@@ -60,6 +67,9 @@ type Stats struct {
 	AvgTime   time.Duration
 	Operators []OperatorStat
 
+	// Только для покупателей.
+	ItemsChosen                         int // выбран айтем
+	ItemsBought                         int // айтем куплен (отчёт отправлен)
 	CompPending, CompPaid, CompRejected int
 	SumPending, SumPaid                 int64
 }
@@ -69,38 +79,30 @@ func (a *Analytics) Rows(ctx context.Context, f storage.ExportFilter) ([]storage
 	return a.store.Repos().Stats.Export(ctx, f)
 }
 
-type ratingAcc struct {
-	n, sum, yes int
-	text        string
-	typ         domain.QuestionType
-}
-
-// Stats считает сводку по заданиям периода.
-func (a *Analytics) Stats(ctx context.Context, f storage.ExportFilter) (*Stats, error) {
+// Stats считает сводку по заданиям периода для одного типа (покупатель или продавец).
+func (a *Analytics) Stats(ctx context.Context, f storage.ExportFilter, kind domain.TaskKind) (*Stats, error) {
 	rows, err := a.Rows(ctx, f)
 	if err != nil {
 		return nil, err
 	}
-	texts, err := a.questionTexts(ctx, rows)
-	if err != nil {
-		return nil, err
-	}
-	st := &Stats{Total: len(rows)}
+	st := &Stats{Kind: kind}
 	type opAcc struct {
 		OperatorStat
 		dur  time.Duration
 		durN int
-		q    map[string]*ratingAcc
-		keys []string
 	}
 	ops := map[string]*opAcc{}
 	var totalDur time.Duration
 	var totalN int
 
 	for _, r := range rows {
+		if r.Kind != kind {
+			continue
+		}
+		st.Total++
 		op := ops[r.Operator]
 		if op == nil {
-			op = &opAcc{OperatorStat: OperatorStat{Operator: r.Operator}, q: map[string]*ratingAcc{}}
+			op = &opAcc{OperatorStat: OperatorStat{Operator: r.Operator}}
 			ops[r.Operator] = op
 		}
 		if !r.SentAt.IsZero() {
@@ -137,6 +139,12 @@ func (a *Analytics) Stats(ctx context.Context, f storage.ExportFilter) (*Stats, 
 				totalN++
 			}
 		}
+		if r.ItemURL != "" {
+			st.ItemsChosen++
+			if r.Revision > 0 {
+				st.ItemsBought++
+			}
+		}
 		switch r.CompStatus {
 		case domain.CompPending:
 			st.CompPending++
@@ -147,29 +155,6 @@ func (a *Analytics) Stats(ctx context.Context, f storage.ExportFilter) (*Stats, 
 		case domain.CompRejected:
 			st.CompRejected++
 		}
-		for _, an := range r.Answers {
-			if an.Skipped || (an.Type != domain.QRating && an.Type != domain.QYesNo) {
-				continue
-			}
-			acc := op.q[an.Key]
-			if acc == nil {
-				acc = &ratingAcc{typ: an.Type, text: texts[r.Operator+"\x00"+an.Key]}
-				op.q[an.Key] = acc
-				op.keys = append(op.keys, an.Key)
-			}
-			switch an.Type {
-			case domain.QRating:
-				if v, err := strconv.Atoi(an.Value); err == nil {
-					acc.n++
-					acc.sum += v
-				}
-			case domain.QYesNo:
-				acc.n++
-				if an.Value == "yes" {
-					acc.yes++
-				}
-			}
-		}
 	}
 	if totalN > 0 {
 		st.AvgTime = totalDur / time.Duration(totalN)
@@ -178,46 +163,10 @@ func (a *Analytics) Stats(ctx context.Context, f storage.ExportFilter) (*Stats, 
 		if op.durN > 0 {
 			op.AvgTime = op.dur / time.Duration(op.durN)
 		}
-		for _, k := range op.keys {
-			acc := op.q[k]
-			if acc.n == 0 {
-				continue
-			}
-			q := QuestionStat{Key: k, Text: acc.text, Type: acc.typ, N: acc.n}
-			if acc.typ == domain.QRating {
-				q.Avg = float64(acc.sum) / float64(acc.n)
-			} else {
-				q.YesPc = 100 * float64(acc.yes) / float64(acc.n)
-			}
-			op.Questions = append(op.Questions, q)
-		}
 		st.Operators = append(st.Operators, op.OperatorStat)
 	}
 	sort.Slice(st.Operators, func(i, j int) bool { return st.Operators[i].Operator < st.Operators[j].Operator })
 	return st, nil
-}
-
-// questionTexts формулировки вопросов по последним версиям сценариев: ключ "оператор\x00вопрос".
-func (a *Analytics) questionTexts(ctx context.Context, rows []storage.ExportRow) (map[string]string, error) {
-	out := map[string]string{}
-	seen := map[int64]bool{}
-	for _, r := range rows {
-		if seen[r.ScenarioID] {
-			continue
-		}
-		seen[r.ScenarioID] = true
-		v, err := a.store.Repos().Scenarios.LatestVersion(ctx, r.ScenarioID)
-		if err != nil {
-			continue // сценарий без версии: подписи будут по ключу
-		}
-		for _, q := range v.Body.Questions {
-			k := r.Operator + "\x00" + q.Key
-			if _, ok := out[k]; !ok {
-				out[k] = q.Text
-			}
-		}
-	}
-	return out, nil
 }
 
 // ---------- CSV ----------
@@ -260,23 +209,32 @@ func buyerName(r storage.ExportRow) string {
 	return strconv.FormatInt(r.UserID, 10)
 }
 
+// kindTitle роль исполнителя в выгрузке («покупатель» или «продавец»).
+func kindTitle(k domain.TaskKind) string {
+	if !k.Valid() {
+		return domain.KindBuyer.Title()
+	}
+	return k.Title()
+}
+
 var compTitle = map[domain.CompStatus]string{
 	domain.CompPending: "к выплате", domain.CompPaid: "выплачено", domain.CompRejected: "отклонено",
 }
 
-// TasksCSV все задания периода: статусы, даты этапов, напоминания, промокод, компенсация.
+// TasksCSV все задания периода: роль, Telegram ID, статусы, даты этапов, напоминания, айтем, промокод, компенсация.
 func (a *Analytics) TasksCSV(rows []storage.ExportRow) []byte {
 	w, buf := newCSV()
-	_ = w.Write([]string{"№ задания", "Покупатель", "Username", "Оператор", "Сценарий", "Версия сценария", "Статус",
+	_ = w.Write([]string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Оператор", "Сценарий", "Версия сценария", "Статус",
 		"Создано", "Отправлено", "Принято", "Срок до", "Отчёт", "Проверено", "Версий отчёта", "После срока", "Решение по отчёту",
-		"Напоминаний", "Промокод", "Сумма компенсации", "Статус компенсации", "Выплачено"})
+		"Напоминаний", "Айтем", "Ссылка на айтем", "Промокод", "Сумма компенсации", "Статус компенсации", "Выплачено"})
 	for _, r := range rows {
 		_ = w.Write([]string{
-			strconv.FormatInt(r.TaskID, 10), safe(buyerName(r)), safe(r.Username), safe(r.Operator), safe(r.Title),
-			strconv.Itoa(r.Version), r.Status.Title(),
+			strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username),
+			safe(r.Operator), safe(r.Title), strconv.Itoa(r.Version), r.Status.Title(),
 			a.when(r.CreatedAt), a.when(r.SentAt), a.when(r.AcceptedAt), a.when(r.DueAt), a.when(r.ReportedAt), a.when(r.ReviewedAt),
 			optInt(r.Revision), yesNo(r.Late), decisionTitle(r.Decision),
-			optInt(r.Reminders), safe(r.PromoCode), optInt64(r.CompAmount), compTitle[r.CompStatus], a.when(r.CompPaidAt),
+			optInt(r.Reminders), safe(r.ItemTitle), safe(r.ItemURL), safe(r.PromoCode),
+			optInt64(r.CompAmount), compTitle[r.CompStatus], a.when(r.CompPaidAt),
 		})
 	}
 	w.Flush()
@@ -307,55 +265,94 @@ func decisionTitle(d string) string {
 	return ""
 }
 
-// AnswersCSV ответы по одному сценарию: одна строка на отчёт, по колонке на каждый вопрос.
-// Фото и видео в таблицу не попадают (файлы хранятся в Telegram), вместо них отметка «приложено».
-func (a *Analytics) AnswersCSV(ctx context.Context, scenarioID int64, rows []storage.ExportRow) ([]byte, error) {
-	v, err := a.store.Repos().Scenarios.LatestVersion(ctx, scenarioID)
-	if err != nil {
-		return nil, err
+// MediaLink ссылка на медиафайл отчёта: открывает бота, и тот присылает файл админу.
+// Прямая ссылка Telegram содержит токен бота, поэтому не используется. Без username бота ссылки нет.
+func MediaLink(bot string, reportID int64, questionKey string) string {
+	if bot == "" {
+		return ""
 	}
-	var keys []string
-	title := map[string]string{}
-	typ := map[string]domain.QuestionType{}
-	for _, q := range v.Body.Questions {
-		keys = append(keys, q.Key)
-		title[q.Key] = q.Text
-		typ[q.Key] = q.Type
-	}
-	// Вопросы старых версий, которых нет в последней, добавляются в конец.
+	return fmt.Sprintf("https://t.me/%s?start=m%dx%s", bot, reportID, questionKey)
+}
+
+// answerColumn колонка вопроса в сводной выгрузке: вопрос конкретного сценария.
+type answerColumn struct {
+	scenario string
+	key      string
+	title    string
+}
+
+// AnswersCSV ответы по отчётам всех сценариев сразу: одна строка на отчёт (последняя версия),
+// у каждого вопроса каждого сценария своя колонка (пустая там, где вопроса нет). В начале роль и
+// Telegram ID. Фото и видео в таблицу не попадают: вместо них ссылка, по которой бот покажет файл админу.
+func (a *Analytics) AnswersCSV(ctx context.Context, rows []storage.ExportRow) ([]byte, error) {
+	reported := make([]storage.ExportRow, 0, len(rows))
 	for _, r := range rows {
-		for _, an := range r.Answers {
-			if _, ok := typ[an.Key]; !ok {
-				keys = append(keys, an.Key)
-				title[an.Key] = an.Key
-				typ[an.Key] = an.Type
-			}
+		if r.Revision > 0 {
+			reported = append(reported, r)
 		}
 	}
+	// По возрастанию номера задания: старые отчёты сверху.
+	sort.Slice(reported, func(i, j int) bool { return reported[i].TaskID < reported[j].TaskID })
+
+	// Колонки: сценарии по ключу, вопросы в порядке сценария; вопросы старых версий в конец.
+	scenarios := map[string]int64{}
+	for _, r := range reported {
+		scenarios[r.Key] = r.ScenarioID
+	}
+	keys := make([]string, 0, len(scenarios))
+	for k := range scenarios {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var cols []answerColumn
+	index := map[[2]string]int{}
+	add := func(sc, key, title string) {
+		if _, ok := index[[2]string{sc, key}]; ok {
+			return
+		}
+		index[[2]string{sc, key}] = len(cols)
+		cols = append(cols, answerColumn{scenario: sc, key: key, title: title})
+	}
+	for _, sc := range keys {
+		v, err := a.store.Repos().Scenarios.LatestVersion(ctx, scenarios[sc])
+		if err != nil {
+			continue // нет версии: колонки возьмём из ответов
+		}
+		for _, q := range v.Body.Questions {
+			add(sc, q.Key, q.Text)
+		}
+	}
+	for _, r := range reported {
+		for _, an := range r.Answers {
+			add(r.Key, an.Key, an.Key)
+		}
+	}
+
 	w, buf := newCSV()
-	head := []string{"№ задания", "Дата отчёта", "Покупатель", "Оператор", "Версия сценария", "Статус", "После срока", "Версия отчёта"}
-	for _, k := range keys {
-		h := k
-		if t := title[k]; t != "" && t != k {
-			h = k + ": " + t
+	head := []string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Оператор", "Сценарий", "Версия сценария", "Статус",
+		"После срока", "Дата отчёта", "Версия отчёта", "Айтем", "Ссылка на айтем"}
+	for _, c := range cols {
+		h := c.scenario + " / " + c.key
+		if c.title != "" && c.title != c.key {
+			h += ": " + c.title
 		}
 		head = append(head, safe(h))
 	}
 	head = append(head, "Сумма компенсации", "Статус компенсации")
 	_ = w.Write(head)
-	for _, r := range rows {
-		if r.Revision == 0 || r.ScenarioID != scenarioID {
-			continue
-		}
-		byKey := map[string]domain.Answer{}
+
+	bot := a.botName()
+	for _, r := range reported {
+		rec := []string{strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username),
+			safe(r.Operator), safe(r.Key), strconv.Itoa(r.Version), r.Status.Title(),
+			yesNo(r.Late), a.when(r.ReportedAt), strconv.Itoa(r.Revision), safe(r.ItemTitle), safe(r.ItemURL)}
+		cells := make([]string, len(cols))
 		for _, an := range r.Answers {
-			byKey[an.Key] = an
+			if i, ok := index[[2]string{r.Key, an.Key}]; ok {
+				cells[i] = answerCell(an, MediaLink(bot, r.ReportID, an.Key))
+			}
 		}
-		rec := []string{strconv.FormatInt(r.TaskID, 10), a.when(r.ReportedAt), safe(buyerName(r)), safe(r.Operator),
-			strconv.Itoa(r.Version), r.Status.Title(), yesNo(r.Late), strconv.Itoa(r.Revision)}
-		for _, k := range keys {
-			rec = append(rec, answerCell(byKey[k], byKey[k].Key != ""))
-		}
+		rec = append(rec, cells...)
 		rec = append(rec, optInt64(r.CompAmount), compTitle[r.CompStatus])
 		_ = w.Write(rec)
 	}
@@ -363,18 +360,19 @@ func (a *Analytics) AnswersCSV(ctx context.Context, scenarioID int64, rows []sto
 	return buf.Bytes(), nil
 }
 
-func answerCell(an domain.Answer, present bool) string {
-	switch {
-	case !present:
-		return ""
-	case an.Skipped:
+func answerCell(an domain.Answer, mediaLink string) string {
+	if an.Skipped {
 		return "(пропущено)"
 	}
 	switch an.Type {
-	case domain.QPhoto:
+	case domain.QPhoto, domain.QVideo:
+		if mediaLink != "" {
+			return mediaLink
+		}
+		if an.Type == domain.QVideo {
+			return "видео приложено"
+		}
 		return "фото приложено"
-	case domain.QVideo:
-		return "видео приложено"
 	case domain.QYesNo:
 		if an.Value == "yes" {
 			return "да"
@@ -387,12 +385,12 @@ func answerCell(an domain.Answer, present bool) string {
 // CompsCSV компенсации периода (только задания, где есть данные компенсации).
 func (a *Analytics) CompsCSV(rows []storage.ExportRow) []byte {
 	w, buf := newCSV()
-	_ = w.Write([]string{"№ задания", "Покупатель", "Оператор", "Сценарий", "Отчёт", "Сумма (сум)", "Статус", "Выплачено"})
+	_ = w.Write([]string{"№ задания", "Telegram ID", "Имя", "Оператор", "Сценарий", "Отчёт", "Сумма (сум)", "Статус", "Выплачено"})
 	for _, r := range rows {
 		if r.CompStatus == "" {
 			continue
 		}
-		_ = w.Write([]string{strconv.FormatInt(r.TaskID, 10), safe(buyerName(r)), safe(r.Operator), safe(r.Title),
+		_ = w.Write([]string{strconv.FormatInt(r.TaskID, 10), strconv.FormatInt(r.UserID, 10), safe(buyerName(r)), safe(r.Operator), safe(r.Title),
 			a.when(r.ReportedAt), strconv.FormatInt(r.CompAmount, 10), compTitle[r.CompStatus], a.when(r.CompPaidAt)})
 	}
 	w.Flush()

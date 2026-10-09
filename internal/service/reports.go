@@ -242,6 +242,15 @@ func (s *Reports) Submit(ctx context.Context, userID, taskID int64, in SubmitInp
 	return res, err
 }
 
+// ReportByID конкретная версия отчёта по номеру (ErrNotFound, если нет).
+func (s *Reports) ReportByID(ctx context.Context, reportID int64) (*domain.Report, error) {
+	rep, err := s.store.Repos().Reports.Get(ctx, reportID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	return rep, err
+}
+
 // Get отчёт и компенсация по заданию (nil, если нет).
 func (s *Reports) Get(ctx context.Context, taskID int64) (*domain.Report, error) {
 	rep, err := s.store.Repos().Reports.ByTask(ctx, taskID)

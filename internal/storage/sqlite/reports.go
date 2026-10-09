@@ -44,13 +44,22 @@ func (r *reportRepo) Create(ctx context.Context, rep *domain.Report) error {
 }
 
 func (r *reportRepo) ByTask(ctx context.Context, taskID int64) (*domain.Report, error) {
+	return r.one(ctx, `task_id = ? ORDER BY revision DESC LIMIT 1`, taskID)
+}
+
+func (r *reportRepo) Get(ctx context.Context, reportID int64) (*domain.Report, error) {
+	return r.one(ctx, `id = ?`, reportID)
+}
+
+// one читает отчёт по условию вместе с ответами.
+func (r *reportRepo) one(ctx context.Context, cond string, arg int64) (*domain.Report, error) {
 	var (
 		rep                domain.Report
 		late, sub, decided int64
 	)
 	err := r.q.QueryRowContext(ctx,
 		`SELECT id, task_id, user_id, revision, late, submitted_at, decision, admin_comment, decided_at
-		   FROM reports WHERE task_id = ? ORDER BY revision DESC LIMIT 1`, taskID).
+		   FROM reports WHERE `+cond, arg).
 		Scan(&rep.ID, &rep.TaskID, &rep.UserID, &rep.Revision, &late, &sub, &rep.Decision, &rep.AdminComment, &decided)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, storage.ErrNotFound

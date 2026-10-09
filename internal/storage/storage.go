@@ -180,6 +180,8 @@ type ReportRepo interface {
 	Create(ctx context.Context, r *domain.Report) error
 	// ByTask последняя версия отчёта по заданию (ErrNotFound, если отчётов нет).
 	ByTask(ctx context.Context, taskID int64) (*domain.Report, error)
+	// Get отчёт (конкретная версия) по его номеру с ответами (ErrNotFound, если нет).
+	Get(ctx context.Context, reportID int64) (*domain.Report, error)
 	// SetDecision записывает решение админа и комментарий в последнюю версию отчёта.
 	SetDecision(ctx context.Context, taskID int64, decision, comment string, by int64, at time.Time) error
 }
@@ -221,11 +223,13 @@ type ExportRow struct {
 	Title      string
 	Operator   string
 	Version    int
+	Kind       domain.TaskKind // тип сценария (покупатель или продавец)
 	Status     domain.TaskStatus
 
 	CreatedAt, SentAt, AcceptedAt, DueAt, DeclinedAt, ReportedAt, ReviewedAt time.Time
 
-	Revision int // версия отчёта (0, если отчёта нет)
+	ReportID int64 // id последней версии отчёта (0, если отчёта нет)
+	Revision int   // версия отчёта (0, если отчёта нет)
 	Late     bool
 	Decision string
 	Answers  []domain.Answer
@@ -235,6 +239,8 @@ type ExportRow struct {
 	CompPaidAt time.Time
 
 	PromoCode string
+	ItemTitle string // выбранный покупателем айтем (пусто, если не выбран)
+	ItemURL   string
 	Reminders int // сколько напоминаний отправлено покупателю
 }
 

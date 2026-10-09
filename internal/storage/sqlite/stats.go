@@ -38,11 +38,11 @@ func (r *statsRepo) Export(ctx context.Context, f storage.ExportFilter) ([]stora
 	}
 	rows, err := r.q.QueryContext(ctx, `
 SELECT t.id, t.user_id, u.first_name, u.username,
-       t.scenario_id, s.key, s.title, s.operator, sv.version, t.status,
+       t.scenario_id, s.key, s.title, s.operator, sv.version, s.kind, t.status,
        t.created_at, t.sent_at, t.accepted_at, t.due_at, t.declined_at, t.reported_at, t.reviewed_at,
        COALESCE(r.id, 0), COALESCE(r.revision, 0), COALESCE(r.late, 0), COALESCE(r.decision, ''),
        COALESCE(c.status, ''), COALESCE(c.amount, 0), COALESCE(c.paid_at, 0),
-       COALESCE(pa.code, ''),
+       COALESCE(pa.code, ''), COALESCE(it.title, ''), COALESCE(it.url, ''),
        (SELECT COUNT(*) FROM task_events e WHERE e.task_id = t.id AND e.kind = 'reminder')
   FROM tasks t
   JOIN users u ON u.tg_id = t.user_id
@@ -52,6 +52,7 @@ SELECT t.id, t.user_id, u.first_name, u.username,
        AND r.revision = (SELECT MAX(revision) FROM reports WHERE task_id = t.id)
   LEFT JOIN compensations c ON c.task_id = t.id
   LEFT JOIN promo_assignments pa ON pa.task_id = t.id
+  LEFT JOIN items it ON it.task_id = t.id
   `+cond+` ORDER BY t.id DESC`, args...)
 	if err != nil {
 		return nil, err
@@ -69,15 +70,16 @@ SELECT t.id, t.user_id, u.first_name, u.username,
 			late                                                                       int
 		)
 		if err := rows.Scan(&x.TaskID, &x.UserID, &x.UserName, &x.Username,
-			&x.ScenarioID, &x.Key, &x.Title, &x.Operator, &x.Version, &x.Status,
+			&x.ScenarioID, &x.Key, &x.Title, &x.Operator, &x.Version, &x.Kind, &x.Status,
 			&created, &sent, &accepted, &due, &declined, &reported, &reviewed,
 			&reportID, &x.Revision, &late, &x.Decision,
-			&x.CompStatus, &x.CompAmount, &paid, &x.PromoCode, &x.Reminders); err != nil {
+			&x.CompStatus, &x.CompAmount, &paid, &x.PromoCode, &x.ItemTitle, &x.ItemURL, &x.Reminders); err != nil {
 			return nil, err
 		}
 		x.CreatedAt, x.SentAt, x.AcceptedAt, x.DueAt = ts(created), ts(sent), ts(accepted), ts(due)
 		x.DeclinedAt, x.ReportedAt, x.ReviewedAt, x.CompPaidAt = ts(declined), ts(reported), ts(reviewed), ts(paid)
 		x.Late = late != 0
+		x.ReportID = reportID
 		if reportID != 0 {
 			reportIdx[reportID] = len(out)
 		}
