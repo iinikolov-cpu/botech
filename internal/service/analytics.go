@@ -367,12 +367,16 @@ func answerCell(an domain.Answer, mediaLink string) string {
 	switch an.Type {
 	case domain.QPhoto, domain.QVideo:
 		if mediaLink != "" {
-			return mediaLink
+			return mediaLink // одна ссылка открывает все файлы этого ответа
 		}
+		word := "фото приложено"
 		if an.Type == domain.QVideo {
-			return "видео приложено"
+			word = "видео приложено"
 		}
-		return "фото приложено"
+		if n := len(an.AllFiles()); n > 1 {
+			word = fmt.Sprintf("%s (%d)", word, n)
+		}
+		return word
 	case domain.QYesNo:
 		if an.Value == "yes" {
 			return "да"

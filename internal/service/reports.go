@@ -114,9 +114,14 @@ func ValidateAnswers(body domain.ScenarioBody, answers []domain.Answer) ([]domai
 				return nil, fmt.Errorf("%w: вопрос %d: ответ да или нет", ErrInvalidReport, i+1)
 			}
 		case domain.QPhoto, domain.QVideo:
-			if a.FileID == "" {
+			files := a.AllFiles()
+			if len(files) == 0 || files[0].ID == "" {
 				return nil, fmt.Errorf("%w: вопрос %d: нужен файл", ErrInvalidReport, i+1)
 			}
+			if len(files) > domain.MaxFilesPerAnswer {
+				return nil, fmt.Errorf("%w: вопрос %d: не больше %d файлов", ErrInvalidReport, i+1, domain.MaxFilesPerAnswer)
+			}
+			a.SetFiles(files)
 		}
 		out = append(out, a)
 	}

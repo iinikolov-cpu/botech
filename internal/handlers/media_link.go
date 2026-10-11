@@ -45,7 +45,7 @@ func (a *App) sendReportMedia(ctx context.Context, b *bot.Bot, admin *domain.Use
 	}
 	var ans *domain.Answer
 	for i := range rep.Answers {
-		if rep.Answers[i].Key == key && !rep.Answers[i].Skipped && rep.Answers[i].FileID != "" {
+		if rep.Answers[i].Key == key && !rep.Answers[i].Skipped && len(rep.Answers[i].AllFiles()) > 0 {
 			ans = &rep.Answers[i]
 		}
 	}
@@ -62,5 +62,14 @@ func (a *App) sendReportMedia(ctx context.Context, b *bot.Bot, admin *domain.Use
 		}
 	}
 	a.log.Info("медиа по ссылке из выгрузки", "admin", maskID(admin.TgID), "report", reportID)
-	a.sendMedia(ctx, b, admin.TgID, []mediaItem{{Video: ans.Type == domain.QVideo, FileID: ans.FileID, Caption: caption}})
+	files := ans.AllFiles()
+	items := make([]mediaItem, 0, len(files))
+	for i, f := range files {
+		c := caption
+		if len(files) > 1 {
+			c = fmt.Sprintf("%s (%d/%d)", caption, i+1, len(files))
+		}
+		items = append(items, mediaItem{Video: ans.Type == domain.QVideo, FileID: f.ID, Caption: c})
+	}
+	a.sendMedia(ctx, b, admin.TgID, items)
 }

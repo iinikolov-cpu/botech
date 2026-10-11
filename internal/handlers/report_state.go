@@ -9,6 +9,10 @@ type reportState struct {
 	Idx     int             `json:"idx"` // номер вопроса в фазе phaseQuestion
 	Answers []domain.Answer `json:"answers"`
 
+	// Collecting: на текущий вопрос с фото или видео уже принят хотя бы один файл; следующие файлы
+	// добавляются к тому же ответу, пока покупатель не нажмёт «Дальше».
+	Collecting bool `json:"collecting,omitempty"`
+
 	NoComp   bool `json:"no_comp"` // задание продавца: данные компенсации не запрашиваются
 	WantComp bool `json:"want_comp"`
 	CompOnly bool `json:"comp_only"` // исправление только данных компенсации, без отчёта
@@ -34,6 +38,26 @@ func (st *reportState) setAnswer(an domain.Answer) {
 		}
 	}
 	st.Answers = append(st.Answers, an)
+}
+
+// answerFor ответ на вопрос с ключом key (пустой, если ответа ещё нет).
+func (st *reportState) answerFor(key string) (domain.Answer, bool) {
+	for _, a := range st.Answers {
+		if a.Key == key {
+			return a, true
+		}
+	}
+	return domain.Answer{}, false
+}
+
+// dropAnswer удаляет ответ на вопрос.
+func (st *reportState) dropAnswer(key string) {
+	for i, a := range st.Answers {
+		if a.Key == key {
+			st.Answers = append(st.Answers[:i:i], st.Answers[i+1:]...)
+			return
+		}
+	}
 }
 
 // advance переходит к следующей фазе после ответа на вопрос.

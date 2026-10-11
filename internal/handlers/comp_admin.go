@@ -245,8 +245,17 @@ func (a *App) openReport(ctx context.Context, b *bot.Bot, admin *domain.User, ta
 	}
 	var media []mediaItem
 	for _, an := range card.Report.Answers {
-		if !an.Skipped && (an.Type == domain.QPhoto || an.Type == domain.QVideo) && an.FileID != "" {
-			media = append(media, mediaItem{Video: an.Type == domain.QVideo, FileID: an.FileID, Caption: qText[an.Key]})
+		if an.Skipped || (an.Type != domain.QPhoto && an.Type != domain.QVideo) {
+			continue
+		}
+		// Все файлы ответа: у второго и следующих в подписи номер «(2/3)».
+		files := an.AllFiles()
+		for i, f := range files {
+			caption := qText[an.Key]
+			if len(files) > 1 {
+				caption = fmt.Sprintf("%s (%d/%d)", caption, i+1, len(files))
+			}
+			media = append(media, mediaItem{Video: an.Type == domain.QVideo, FileID: f.ID, Caption: caption})
 		}
 	}
 	album := a.sendMedia(ctx, b, admin.TgID, media)

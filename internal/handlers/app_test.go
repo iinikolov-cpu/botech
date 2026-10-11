@@ -542,6 +542,7 @@ func TestPromoReportCompensationFlow(t *testing.T) {
 		t.Fatalf("ожидание фото: %q", got)
 	}
 	e.sendPhoto(2000, "PHOTO1")
+	e.press(t, 2000, "rpt:n:", "")
 	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Вопрос 4 из 4") || !strings.Contains(m.Text, "необязательный") {
 		t.Fatalf("четвёртый вопрос: %q", m.Text)
 	}
@@ -743,6 +744,7 @@ func (e *testEnv) completeReport(t *testing.T, user, taskID int64) {
 	e.press(t, user, "rpt:r:", ":5")
 	e.press(t, user, "rpt:y:", ":yes")
 	e.sendPhoto(user, "P")
+	e.press(t, user, "rpt:n:", "")
 	e.press(t, user, "rpt:s:", "")
 	e.press(t, user, "rpt:ca:", ":0")
 	e.press(t, user, "rpt:ok:", "")
@@ -853,6 +855,7 @@ func (e *testEnv) completeReportWithComp(t *testing.T, user, taskID int64, amoun
 	e.press(t, user, "rpt:r:", ":5")
 	e.press(t, user, "rpt:y:", ":yes")
 	e.sendPhoto(user, "P-"+amount)
+	e.press(t, user, "rpt:n:", "")
 	e.press(t, user, "rpt:s:", "")
 	e.press(t, user, "rpt:ca:", ":1")
 	e.say(user, amount)
@@ -917,6 +920,7 @@ func TestReworkFlow(t *testing.T) {
 	e.press(t, 2000, "rpt:r:", ":4")
 	e.press(t, 2000, "rpt:y:", ":yes")
 	e.sendPhoto(2000, "PHOTO-FIXED")
+	e.press(t, 2000, "rpt:n:", "")
 	e.press(t, 2000, "rpt:s:", "")
 	// Компенсация уже отправлена: заново её не спрашиваем, сразу итог с прежней суммой.
 	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Проверьте отчёт") || !strings.Contains(m.Text, "150 000 сум, данные уже отправлены") {
@@ -1047,8 +1051,11 @@ func TestReportMediaBeforeButtons(t *testing.T) {
 	e.ensureItem(t, 1)
 	e.click(2000, "tsk:rp:1")
 	e.sendPhoto(2000, "A1")
+	e.press(t, 2000, "rpt:n:", "")
 	e.sendPhoto(2000, "A2")
+	e.press(t, 2000, "rpt:n:", "")
 	e.sendPhoto(2000, "A3")
+	e.press(t, 2000, "rpt:n:", "")
 	e.say(2000, "всё хорошо")
 	e.press(t, 2000, "rpt:ca:", ":0")
 	e.press(t, 2000, "rpt:ok:", "")
@@ -1102,6 +1109,7 @@ func TestReworkChangeCompensation(t *testing.T) {
 	e.press(t, 2000, "rpt:r:", ":3")
 	e.press(t, 2000, "rpt:y:", ":no")
 	e.sendPhoto(2000, "P2")
+	e.press(t, 2000, "rpt:n:", "")
 	e.press(t, 2000, "rpt:s:", "")
 	// Передумал: открываем ввод, затем возвращаемся «Назад» к итогу без изменений.
 	e.press(t, 2000, "rpt:cc:", "")
@@ -1144,6 +1152,7 @@ func TestReworkAfterRejectedCompensation(t *testing.T) {
 	e.press(t, 2000, "rpt:r:", ":5")
 	e.press(t, 2000, "rpt:y:", ":yes")
 	e.sendPhoto(2000, "P3")
+	e.press(t, 2000, "rpt:n:", "")
 	e.press(t, 2000, "rpt:s:", "")
 	// Вопрос «нужна ли компенсация» не задаётся: сразу просят новую сумму.
 	if m, _ := e.tg.lastTo(2000); !strings.Contains(m.Text, "Введите сумму") {

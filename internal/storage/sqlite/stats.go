@@ -115,7 +115,7 @@ SELECT t.id, t.user_id, u.first_name, u.username,
 // loadAnswers дописывает в rows ответы отчётов с указанными id.
 func (r *statsRepo) loadAnswers(ctx context.Context, out []storage.ExportRow, reportIdx map[int64]int, ids []any) error {
 	arows, err := r.q.QueryContext(ctx,
-		`SELECT report_id, question_key, type, value, file_id, file_unique_id, skipped FROM report_answers
+		`SELECT report_id, question_key, type, value, file_id, file_unique_id, files, skipped FROM report_answers
 		  WHERE report_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) ORDER BY id`, ids...)
 	if err != nil {
 		return err
@@ -125,13 +125,14 @@ func (r *statsRepo) loadAnswers(ctx context.Context, out []storage.ExportRow, re
 		var (
 			rid     int64
 			a       domain.Answer
+			files   string
 			skipped int
 		)
-		if err := arows.Scan(&rid, &a.Key, &a.Type, &a.Value, &a.FileID, &a.FileUniqueID, &skipped); err != nil {
+		if err := arows.Scan(&rid, &a.Key, &a.Type, &a.Value, &a.FileID, &a.FileUniqueID, &files, &skipped); err != nil {
 			return err
 		}
 		if i, ok := reportIdx[rid]; ok {
-			a.Skipped = skipped != 0
+			a.Skipped, a.Files = skipped != 0, decodeFiles(files)
 			out[i].Answers = append(out[i].Answers, a)
 		}
 	}

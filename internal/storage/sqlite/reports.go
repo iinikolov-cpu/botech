@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -34,13 +35,37 @@ func (r *reportRepo) Create(ctx context.Context, rep *domain.Report) error {
 	}
 	for _, a := range rep.Answers {
 		if _, err := r.q.ExecContext(ctx,
-			`INSERT INTO report_answers (report_id, question_key, type, value, file_id, file_unique_id, skipped)
-			 VALUES (?,?,?,?,?,?,?)`,
-			rep.ID, a.Key, a.Type, a.Value, a.FileID, a.FileUniqueID, b2i(a.Skipped)); err != nil {
+			`INSERT INTO report_answers (report_id, question_key, type, value, file_id, file_unique_id, files, skipped)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			rep.ID, a.Key, a.Type, a.Value, a.FileID, a.FileUniqueID, encodeFiles(a.Files), b2i(a.Skipped)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// encodeFiles записывает список файлов ответа JSON-ом (пусто для ответов без файлов).
+func encodeFiles(files []domain.File) string {
+	if len(files) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(files)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeFiles читает список файлов; для старых ответов (пустая строка) возвращает nil.
+func decodeFiles(s string) []domain.File {
+	if s == "" {
+		return nil
+	}
+	var files []domain.File
+	if err := json.Unmarshal([]byte(s), &files); err != nil {
+		return nil
+	}
+	return files
 }
 
 func (r *reportRepo) ByTask(ctx context.Context, taskID int64) (*domain.Report, error) {
@@ -70,7 +95,7 @@ func (r *reportRepo) one(ctx context.Context, cond string, arg int64) (*domain.R
 	rep.Late, rep.SubmittedAt, rep.DecidedAt = late != 0, time.Unix(sub, 0).UTC(), ts(decided)
 
 	rows, err := r.q.QueryContext(ctx,
-		`SELECT question_key, type, value, file_id, file_unique_id, skipped FROM report_answers WHERE report_id = ? ORDER BY id`, rep.ID)
+		`SELECT question_key, type, value, file_id, file_unique_id, files, skipped FROM report_answers WHERE report_id = ? ORDER BY id`, rep.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +104,13 @@ func (r *reportRepo) one(ctx context.Context, cond string, arg int64) (*domain.R
 		var (
 			a       domain.Answer
 			typ     string
+			files   string
 			skipped int64
 		)
-		if err := rows.Scan(&a.Key, &typ, &a.Value, &a.FileID, &a.FileUniqueID, &skipped); err != nil {
+		if err := rows.Scan(&a.Key, &typ, &a.Value, &a.FileID, &a.FileUniqueID, &files, &skipped); err != nil {
 			return nil, err
 		}
-		a.Type, a.Skipped = domain.QuestionType(typ), skipped != 0
+		a.Type, a.Skipped, a.Files = domain.QuestionType(typ), skipped != 0, decodeFiles(files)
 		rep.Answers = append(rep.Answers, a)
 	}
 	return &rep, rows.Err()

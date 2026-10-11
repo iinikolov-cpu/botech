@@ -43,14 +43,44 @@ type PromoStats struct {
 	WithUsesLeft int // коды с остатком использований (свободные и занятые вместе)
 }
 
+// MaxFilesPerAnswer сколько фото или видео можно приложить к одному ответу.
+const MaxFilesPerAnswer = 10
+
+// File файл в Telegram (фото или видео): идентификатор для отправки и уникальный для сравнения.
+type File struct {
+	ID       string `json:"id"`
+	UniqueID string `json:"uid,omitempty"`
+}
+
 // Answer ответ на вопрос чек-листа.
 type Answer struct {
 	Key          string       `json:"key"`
 	Type         QuestionType `json:"type"`
-	Value        string       `json:"value,omitempty"` // текст, оценка "1".."5" или "yes"/"no"
-	FileID       string       `json:"file_id,omitempty"`
-	FileUniqueID string       `json:"file_unique_id,omitempty"`
+	Value        string       `json:"value,omitempty"`          // текст, оценка "1".."5" или "yes"/"no"
+	FileID       string       `json:"file_id,omitempty"`        // первый файл (для совместимости)
+	FileUniqueID string       `json:"file_unique_id,omitempty"` // его уникальный идентификатор
+	Files        []File       `json:"files,omitempty"`          // все файлы ответа (фото или видео), включая первый
 	Skipped      bool         `json:"skipped,omitempty"`
+}
+
+// AllFiles все файлы ответа: Files, а для старых ответов с одним файлом FileID.
+func (a Answer) AllFiles() []File {
+	if len(a.Files) > 0 {
+		return a.Files
+	}
+	if a.FileID != "" {
+		return []File{{ID: a.FileID, UniqueID: a.FileUniqueID}}
+	}
+	return nil
+}
+
+// SetFiles записывает файлы ответа и поддерживает поля первого файла.
+func (a *Answer) SetFiles(files []File) {
+	a.Files = files
+	a.FileID, a.FileUniqueID = "", ""
+	if len(files) > 0 {
+		a.FileID, a.FileUniqueID = files[0].ID, files[0].UniqueID
+	}
 }
 
 // Решение админа по отчёту.

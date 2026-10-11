@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -53,6 +54,8 @@ type App struct {
 
 	panels *panelStore // «живое» меню каждого пользователя (см. panel.go)
 
+	userMu sync.Map // id пользователя -> *sync.Mutex: сообщения одного пользователя в отчёте обрабатываются по очереди
+
 	badInvites *limiter // неудачные попытки ввода кода незнакомцами
 	noAccess   *limiter // ответы «нет доступа» (чтобы не спамить в ответ на спам)
 }
@@ -98,6 +101,9 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 		return
 	}
 	m := upd.Message
+	// Альбом приходит несколькими сообщениями почти одновременно: обрабатываем по одному, иначе
+	// они перезапишут состояние друг друга.
+	defer a.lockUser(u.TgID)()
 	switch state, _ := a.dialog.Get(ctx, u.TgID, nil); state {
 	case reportDialog:
 		if st, ok := a.loadReport(ctx, u.TgID); ok {
@@ -150,6 +156,14 @@ func (a *App) DefaultHandler(ctx context.Context, b *bot.Bot, upd *models.Update
 	if m.Text != "" {
 		a.send(ctx, b, u.TgID, i18n.T(lang(u), "help_buyer"), nil)
 	}
+}
+
+// lockUser захватывает очередь пользователя; вызывать как defer a.lockUser(id)().
+func (a *App) lockUser(id int64) func() {
+	v, _ := a.userMu.LoadOrStore(id, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func lang(u *domain.User) i18n.Lang {

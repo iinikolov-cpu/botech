@@ -160,6 +160,14 @@ func (a *App) ask(ctx context.Context, b *bot.Bot, u *domain.User, st *reportSta
 		case domain.QVideo:
 			text += i18n.T(l, "rpt_hint_video")
 		}
+		if cur, ok := st.answerFor(q.Key); ok && st.Collecting {
+			// Файл(ы) уже приняты: показываем счётчик и кнопку «Дальше».
+			text = i18n.T(l, "rpt_question", st.Idx+1, len(qs), esc(q.Text)) + "\n\n" + i18n.T(l, "rpt_collect", len(cur.AllFiles()))
+			rows = append(rows, row(btn(i18n.T(l, "btn_next"), cb("n"))))
+			rows = append(rows, nav(true, false))
+			a.sendPanel(ctx, b, u.TgID, text, kb(rows...))
+			break
+		}
 		if !q.Required {
 			text += i18n.T(l, "rpt_optional")
 		}
@@ -216,6 +224,9 @@ func (a *App) answerText(l i18n.Lang, an domain.Answer) string {
 	case an.Skipped || an.Key == "":
 		return i18n.T(l, "rpt_answer_skipped")
 	case an.Type == domain.QPhoto || an.Type == domain.QVideo:
+		if n := len(an.AllFiles()); n > 1 {
+			return i18n.T(l, "rpt_answer_files", n)
+		}
 		return i18n.T(l, "rpt_answer_file")
 	case an.Type == domain.QYesNo && an.Value == "yes":
 		return i18n.T(l, "rpt_yes")
@@ -232,6 +243,7 @@ func (a *App) onReportCallback(ctx context.Context, b *bot.Bot, upd *models.Upda
 	if u == nil {
 		return
 	}
+	defer a.lockUser(u.TgID)()
 	l := lang(u)
 	parts := strings.Split(cb.Data, ":")
 	if len(parts) < 3 {
@@ -264,9 +276,22 @@ func (a *App) onReportCallback(ctx context.Context, b *bot.Bot, upd *models.Upda
 		a.edit(ctx, b, cb, i18n.T(l, "rpt_cancelled"), nil)
 		return
 	case "b":
-		st.back(len(qs))
+		if st.Phase == phaseQuestion && st.Collecting {
+			// Вернуться к вопросу с файлами: принятые файлы сбрасываются, вопрос задаётся заново.
+			st.dropAnswer(qs[st.Idx].Key)
+			st.Collecting = false
+		} else {
+			st.back(len(qs))
+		}
+	case "n": // «Дальше» после приёма файлов
+		if st.Phase != phaseQuestion || !st.Collecting {
+			a.answerCB(ctx, b, cb.ID, i18n.T(l, "rpt_stale"), true)
+			return
+		}
+		st.Collecting = false
+		st.advance(len(qs))
 	case "s":
-		if st.Phase != phaseQuestion || qs[st.Idx].Required {
+		if st.Phase != phaseQuestion || st.Collecting || qs[st.Idx].Required {
 			a.answerCB(ctx, b, cb.ID, i18n.T(l, "rpt_stale"), true)
 			return
 		}
@@ -353,19 +378,47 @@ func (a *App) onReportMessage(ctx context.Context, b *bot.Bot, u *domain.User, s
 				return
 			}
 			an.Value = text
-		case domain.QPhoto:
-			id, uid := largestPhoto(m)
-			if id == "" {
-				remind("rpt_wait_photo")
+		case domain.QPhoto, domain.QVideo:
+			var f domain.File
+			if q.Type == domain.QPhoto {
+				f.ID, f.UniqueID = largestPhoto(m)
+				if f.ID == "" {
+					remind("rpt_wait_photo")
+					return
+				}
+			} else {
+				if m.Video == nil {
+					remind("rpt_wait_video")
+					return
+				}
+				f.ID, f.UniqueID = m.Video.FileID, m.Video.FileUniqueID
+			}
+			// Файлы одного вопроса копятся, пока покупатель не нажмёт «Дальше» (альбом приходит по одному).
+			var files []domain.File
+			if cur, ok := st.answerFor(q.Key); ok && st.Collecting {
+				files = cur.AllFiles()
+			}
+			if len(files) >= domain.MaxFilesPerAnswer {
+				a.send(ctx, b, u.TgID, i18n.T(l, "rpt_files_max", domain.MaxFilesPerAnswer), nil)
 				return
 			}
-			an.FileID, an.FileUniqueID = id, uid
-		case domain.QVideo:
-			if m.Video == nil {
-				remind("rpt_wait_video")
-				return
+			dup := false
+			for _, x := range files {
+				dup = dup || (f.UniqueID != "" && x.UniqueID == f.UniqueID)
 			}
-			an.FileID, an.FileUniqueID = m.Video.FileID, m.Video.FileUniqueID
+			if !dup {
+				files = append(files, f)
+			}
+			an.SetFiles(files)
+			st.setAnswer(an)
+			st.Collecting = true
+			if len(st.Msgs) < 100 {
+				st.Msgs = append(st.Msgs, m.ID)
+			}
+			st.Step++
+			a.saveReport(ctx, u.TgID, st)
+			a.ask(ctx, b, u, st)
+			return
 		default: // оценка и да/нет выбираются кнопками
 			remind("rpt_wait_choice")
 			return

@@ -506,3 +506,59 @@ func TestReviewedStaysUntilCompensationClosed(t *testing.T) {
 		t.Fatalf("после выплаты в списке покупателя пусто, а там %d", len(list))
 	}
 }
+
+// Несколько файлов в одном ответе: проверка, сохранение и чтение; старые ответы с одним файлом читаются как раньше.
+func TestSubmitMultipleFiles(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	sc := e.importScenario(t, reportScenario).Scenario
+	id := e.acceptedTask(t, sc.ID, 1)
+
+	many := make([]domain.File, domain.MaxFilesPerAnswer+1)
+	for i := range many {
+		many[i] = domain.File{ID: fmt.Sprintf("F%d", i), UniqueID: fmt.Sprintf("U%d", i)}
+	}
+	tooMany := goodAnswers()
+	tooMany[2].Files = many
+	if _, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: tooMany}); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("слишком много файлов: %v", err)
+	}
+	emptyFile := goodAnswers()
+	emptyFile[2] = domain.Answer{Key: "photo"}
+	if _, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: emptyFile}); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("без файла: %v", err)
+	}
+
+	ans := goodAnswers()
+	ans[2].SetFiles([]domain.File{{ID: "F1", UniqueID: "U1"}, {ID: "F2", UniqueID: "U2"}, {ID: "F3", UniqueID: "U3"}})
+	if _, err := e.reports().Submit(ctx, 1, id, SubmitInput{Answers: ans}); err != nil {
+		t.Fatal(err)
+	}
+	card, _ := e.tasks.Card(ctx, id)
+	var got domain.Answer
+	for _, a := range card.Report.Answers {
+		if a.Key == "photo" {
+			got = a
+		}
+	}
+	if files := got.AllFiles(); len(files) != 3 || files[1].ID != "F2" || got.FileID != "F1" {
+		t.Fatalf("сохранённые файлы: %+v", got)
+	}
+	// Выгрузка видит те же файлы.
+	rows, _ := NewAnalytics(e.store, uzt).Rows(ctx, storage.ExportFilter{})
+	found := false
+	for _, a := range rows[0].Answers {
+		if a.Key == "photo" && len(a.AllFiles()) == 3 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("в выгрузке нет трёх файлов: %+v", rows[0].Answers)
+	}
+
+	// Ответ в старом формате (только FileID, без Files) по-прежнему считается одним файлом.
+	old := domain.Answer{Key: "photo", FileID: "OLD", FileUniqueID: "OLDU"}
+	if files := old.AllFiles(); len(files) != 1 || files[0].ID != "OLD" {
+		t.Fatalf("старый формат: %+v", files)
+	}
+}
