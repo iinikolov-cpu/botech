@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Config содержит все настройки приложения.
@@ -44,8 +46,17 @@ type Config struct {
 	AuthMode         string
 	AuthEmailDomains []string      // разрешённые домены почты
 	AuthOTPTTL       time.Duration // сколько действует код из письма
-	SMTP             SMTP          // настройки отправки писем (обязательны в режиме email)
+	MailTransport    string        // как отправлять письма: MailSMTP или MailScript
+	SMTP             SMTP          // настройки SMTP (при MailTransport=smtp в режиме email)
+	MailScriptURL    string        // адрес веб-приложения Google Apps Script (при MailTransport=script)
+	MailScriptSecret string        // общий секрет для скрипта
 }
+
+// Способы отправки писем.
+const (
+	MailSMTP   = "smtp"
+	MailScript = "script"
+)
 
 // Способы входа.
 const (
@@ -208,13 +219,37 @@ func loadAuth(c *Config) error {
 		}
 		c.SMTP.Port = n
 	}
+	c.MailTransport = strings.ToLower(getenv("MAIL_TRANSPORT", MailSMTP))
+	if c.MailTransport != MailSMTP && c.MailTransport != MailScript {
+		return fmt.Errorf("MAIL_TRANSPORT должна быть %q (SMTP) или %q (Google Apps Script)", MailSMTP, MailScript)
+	}
+	c.MailScriptURL = getenv("MAIL_SCRIPT_URL", "")
+	c.MailScriptSecret = os.Getenv("MAIL_SCRIPT_SECRET")
 	if c.AuthMode == AuthEmail {
-		if c.SMTP.Host == "" || c.SMTP.From == "" {
-			return errors.New("для AUTH_MODE=email нужны SMTP_HOST и SMTP_FROM (и обычно SMTP_USER, SMTP_PASSWORD)")
+		if c.MailTransport == MailScript {
+			if err := checkScript(c.MailScriptURL, c.MailScriptSecret); err != nil {
+				return err
+			}
+		} else {
+			if c.SMTP.Host == "" || c.SMTP.From == "" {
+				return errors.New("для AUTH_MODE=email нужны SMTP_HOST и SMTP_FROM (и обычно SMTP_USER, SMTP_PASSWORD), либо MAIL_TRANSPORT=script")
+			}
+			if _, err := mail.ParseAddress(c.SMTP.From); err != nil {
+				return fmt.Errorf("SMTP_FROM: неверный адрес отправителя: %w", err)
+			}
 		}
-		if _, err := mail.ParseAddress(c.SMTP.From); err != nil {
-			return fmt.Errorf("SMTP_FROM: неверный адрес отправителя: %w", err)
-		}
+	}
+	return nil
+}
+
+// checkScript проверяет настройки отправки через Google Apps Script.
+func checkScript(rawURL, secret string) error {
+	u, err := url.Parse(rawURL)
+	if rawURL == "" || err != nil || u.Scheme != "https" || u.Host != "script.google.com" || !strings.HasSuffix(u.Path, "/exec") {
+		return errors.New("MAIL_SCRIPT_URL: нужен адрес развёртывания вида https://script.google.com/macros/s/.../exec")
+	}
+	if utf8.RuneCountInString(secret) < 16 {
+		return errors.New("MAIL_SCRIPT_SECRET: общий секрет не короче 16 символов (тот же, что в свойствах скрипта)")
 	}
 	return nil
 }

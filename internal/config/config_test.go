@@ -154,6 +154,46 @@ func TestLoadAuth(t *testing.T) {
 			}
 		})
 	}
+	// Отправка через Google Apps Script: SMTP не нужен.
+	t.Setenv("SMTP_HOST", "")
+	t.Setenv("SMTP_FROM", "")
+	t.Setenv("AUTH_MODE", "email")
+	t.Setenv("MAIL_TRANSPORT", "script")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MAIL_SCRIPT_URL") {
+		t.Fatalf("script без адреса: %v", err)
+	}
+	okURL := "https://script.google.com/macros/s/AKfycbx123/exec"
+	okSecret := "0123456789abcdef0123"
+	t.Setenv("MAIL_SCRIPT_URL", okURL)
+	t.Setenv("MAIL_SCRIPT_SECRET", okSecret)
+	if c, err = Load(); err != nil || c.MailTransport != MailScript || c.MailScriptURL != okURL || c.MailScriptSecret != okSecret {
+		t.Fatalf("script: %v %+v", err, c)
+	}
+	for k, v := range map[string]string{
+		"MAIL_SCRIPT_URL":    "http://script.google.com/macros/s/x/exec",
+		"MAIL_SCRIPT_SECRET": "короткий",
+		"MAIL_TRANSPORT":     "pigeon",
+	} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv(k, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q должно давать ошибку", k, v)
+			}
+		})
+	}
+	t.Run("чужой хост", func(t *testing.T) {
+		t.Setenv("MAIL_SCRIPT_URL", "https://evil.example.com/macros/s/x/exec")
+		if _, err := Load(); err == nil {
+			t.Fatal("чужой хост должен отклоняться")
+		}
+	})
+	t.Run("не exec", func(t *testing.T) {
+		t.Setenv("MAIL_SCRIPT_URL", "https://script.google.com/macros/s/x/dev")
+		if _, err := Load(); err == nil {
+			t.Fatal("адрес без /exec должен отклоняться")
+		}
+	})
+	t.Setenv("MAIL_TRANSPORT", "smtp")
 	// В режиме по инвайтам настройки почты не нужны.
 	t.Setenv("AUTH_MODE", "invite")
 	t.Setenv("SMTP_HOST", "")

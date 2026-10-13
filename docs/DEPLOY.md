@@ -135,6 +135,43 @@ sudo docker compose logs
 ### Вход по почте сотрудника (AUTH_MODE=email)
 По умолчанию новые пользователи входят по инвайтам. Чтобы пускать сотрудников по рабочей почте, в `.env` задайте `AUTH_MODE=email` и настройки почтового сервера (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`; пример для Google Workspace: хост `smtp.gmail.com`, порт `587`, пароль приложения), затем `sudo docker compose up -d`.
 
+**Без SMTP: отправка через Google Apps Script** (`MAIL_TRANSPORT=script`). Письма уходят от вашего аккаунта Google, пароль приложения не нужен.
+1. Откройте script.google.com, создайте проект, вставьте код:
+```js
+const ALLOWED = ['dila-team.com', 'listee-team.com'];
+
+function doPost(e) {
+  try {
+    const req = JSON.parse(e.postData.contents);
+    const secret = PropertiesService.getScriptProperties().getProperty('SECRET');
+    if (!secret || req.secret !== secret) return out({ok: false, error: 'неверный секрет'});
+    const to = String(req.to || '').trim().toLowerCase();
+    const m = /^[^\s@<>,;]+@([a-z0-9.-]+)$/.exec(to);
+    if (!m || ALLOWED.indexOf(m[1]) < 0) return out({ok: false, error: 'адрес не разрешён'});
+    MailApp.sendEmail({
+      to: to,
+      subject: String(req.subject || '').slice(0, 200),
+      body: String(req.body || '').slice(0, 2000),
+      name: String(req.name || 'Бот').slice(0, 100),
+      noReply: true
+    });
+    return out({ok: true});
+  } catch (err) {
+    return out({ok: false, error: String(err).slice(0, 150)});
+  }
+}
+
+function out(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+```
+2. Слева «Настройки проекта» → «Свойства скрипта» → добавьте свойство `SECRET` с длинным случайным значением (не короче 16 символов).
+3. «Развернуть» → «Новое развёртывание» → тип «Веб-приложение», «Выполнять от имени»: Я, «Доступ»: Все. Разрешите доступ к почте. Скопируйте адрес, он оканчивается на `/exec`.
+4. В `.env`: `MAIL_TRANSPORT=script`, `MAIL_SCRIPT_URL=<адрес>`, `MAIL_SCRIPT_SECRET=<то же значение, что SECRET>`, затем `sudo docker compose up -d`.
+5. После любой правки кода скрипта делайте «Управление развёртываниями» → «Изменить» → «Новая версия», иначе работает старый код.
+
+Лимит MailApp: около 1500 писем в сутки для Workspace и 100 для обычного Gmail. Адрес развёртывания и секрет храните как пароль.
+
 Как это работает для человека:
 1. Он пишет боту, бот просит рабочую почту. Подходят только адреса на доменах из `AUTH_EMAIL_DOMAINS` (по умолчанию `dila-team.com` и `listee-team.com`, домен проверяется полностью).
 2. На почту приходит 6-значный код, он действует 300 секунд (`AUTH_OTP_TTL_SECONDS`).
@@ -193,6 +230,7 @@ sudo docker compose logs
 | `AUTH_MODE` | как входят новые пользователи: `invite` (по инвайтам) или `email` (по рабочей почте с кодом из письма) | `invite` |
 | `AUTH_EMAIL_DOMAINS` | разрешённые домены почты (только при `email`) | `dila-team.com,listee-team.com` |
 | `AUTH_OTP_TTL_SECONDS` | сколько секунд действует код из письма | `300` |
+| `MAIL_TRANSPORT`, `MAIL_SCRIPT_URL`, `MAIL_SCRIPT_SECRET` | как отправлять коды: `smtp` или `script` (Google Apps Script, нужны адрес `/exec` и секрет от 16 символов) | `smtp` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | почтовый сервер для отправки кодов (обязательны `SMTP_HOST` и `SMTP_FROM` при `email`) | порт `587`, шифрование `starttls` |
 
 Время ежедневной копии (по умолчанию 03:00) меняется в боте: `/admin`, **⚙ Настройки**.
