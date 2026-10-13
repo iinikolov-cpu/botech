@@ -110,6 +110,7 @@ func reposFor(q dbtx) storage.Repos {
 		Reminders: &reminderRepo{q},
 		Stats:     &statsRepo{q},
 		Items:     &itemRepo{q},
+		OTP:       &otpRepo{q},
 	}
 }
 

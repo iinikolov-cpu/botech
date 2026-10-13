@@ -4,8 +4,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,30 @@ type Config struct {
 	QuietTo   int
 	// StaleMinutes: через сколько минут ожидания в списке заданий появляется отметка «давно без ответа».
 	StaleMinutes int
+
+	// Способ входа новых пользователей: AuthInvite (по инвайтам) или AuthEmail (по почте сотрудника с кодом из письма).
+	// Уже зарегистрированные пользователи при переключении сохраняются и заново не регистрируются.
+	AuthMode         string
+	AuthEmailDomains []string      // разрешённые домены почты
+	AuthOTPTTL       time.Duration // сколько действует код из письма
+	SMTP             SMTP          // настройки отправки писем (обязательны в режиме email)
+}
+
+// Способы входа.
+const (
+	AuthInvite = "invite"
+	AuthEmail  = "email"
+)
+
+// SMTP настройки почтового сервера для отправки кодов.
+type SMTP struct {
+	Host     string
+	Port     int
+	User     string
+	Password string
+	From     string
+	// Security: "starttls" (порт 587, по умолчанию), "tls" (порт 465, сразу шифрованное соединение) или "none" (без шифрования, только для доверенной сети).
+	Security string
 }
 
 // Пределы для интервалов напоминаний: защита от опечаток.
@@ -110,7 +136,87 @@ func Load() (*Config, error) {
 		}
 		c.StaleMinutes = n
 	}
+
+	if err := loadAuth(c); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// domainRe допустимый домен почты: латиница, цифры, дефис и точки между частями.
+var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// ParseDomains разбирает список доменов через запятую.
+func ParseDomains(s string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+		f = strings.TrimPrefix(f, "@")
+		if !domainRe.MatchString(f) {
+			return nil, fmt.Errorf("%q не похоже на домен (пример: dila-team.com)", f)
+		}
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("нужен хотя бы один домен")
+	}
+	return out, nil
+}
+
+// loadAuth читает настройки входа и почты.
+func loadAuth(c *Config) error {
+	c.AuthMode = strings.ToLower(getenv("AUTH_MODE", AuthInvite))
+	if c.AuthMode != AuthInvite && c.AuthMode != AuthEmail {
+		return fmt.Errorf("AUTH_MODE должна быть %q (по инвайтам) или %q (по почте)", AuthInvite, AuthEmail)
+	}
+	var err error
+	if c.AuthEmailDomains, err = ParseDomains(getenv("AUTH_EMAIL_DOMAINS", "dila-team.com,listee-team.com")); err != nil {
+		return fmt.Errorf("AUTH_EMAIL_DOMAINS: %w", err)
+	}
+	c.AuthOTPTTL = 300 * time.Second
+	if v := strings.TrimSpace(os.Getenv("AUTH_OTP_TTL_SECONDS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 60 || n > 3600 {
+			return errors.New("AUTH_OTP_TTL_SECONDS должна быть числом секунд от 60 до 3600")
+		}
+		c.AuthOTPTTL = time.Duration(n) * time.Second
+	}
+
+	c.SMTP = SMTP{
+		Host:     getenv("SMTP_HOST", ""),
+		User:     getenv("SMTP_USER", ""),
+		Password: os.Getenv("SMTP_PASSWORD"),
+		From:     getenv("SMTP_FROM", ""),
+		Security: strings.ToLower(getenv("SMTP_SECURITY", "starttls")),
+	}
+	switch c.SMTP.Security {
+	case "starttls", "tls", "none":
+	default:
+		return errors.New("SMTP_SECURITY должна быть starttls, tls или none")
+	}
+	c.SMTP.Port = 587
+	if c.SMTP.Security == "tls" {
+		c.SMTP.Port = 465
+	}
+	if v := strings.TrimSpace(os.Getenv("SMTP_PORT")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("SMTP_PORT должна быть числом от 1 до 65535")
+		}
+		c.SMTP.Port = n
+	}
+	if c.AuthMode == AuthEmail {
+		if c.SMTP.Host == "" || c.SMTP.From == "" {
+			return errors.New("для AUTH_MODE=email нужны SMTP_HOST и SMTP_FROM (и обычно SMTP_USER, SMTP_PASSWORD)")
+		}
+		if _, err := mail.ParseAddress(c.SMTP.From); err != nil {
+			return fmt.Errorf("SMTP_FROM: неверный адрес отправителя: %w", err)
+		}
+	}
+	return nil
 }
 
 // ParseMinutes разбирает список минут "1440,2880" (строго по возрастанию). "off" или пустое значение

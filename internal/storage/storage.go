@@ -29,6 +29,29 @@ type UserRepo interface {
 	// ListForKind и CountForKind: пользователи роли buyer с данным статусом, готовые делать задания этого типа.
 	ListForKind(ctx context.Context, status domain.UserStatus, kind domain.TaskKind, limit, offset int) ([]*domain.User, error)
 	CountForKind(ctx context.Context, status domain.UserStatus, kind domain.TaskKind) (int, error)
+	// ByEmail пользователь с этой почтой (ErrNotFound, если никто не привязан).
+	ByEmail(ctx context.Context, email string) (*domain.User, error)
+	// ClearEmail снимает привязку почты у пользователя.
+	ClearEmail(ctx context.Context, tgID int64, at time.Time) error
+}
+
+// OTPRepo коды подтверждения почты и журнал их отправок.
+type OTPRepo interface {
+	// Put сохраняет код, заменяя прежний код этого аккаунта.
+	Put(ctx context.Context, o *domain.EmailOTP) error
+	// Get возвращает действующую запись кода аккаунта (ErrNotFound, если кода нет).
+	Get(ctx context.Context, tgID int64) (*domain.EmailOTP, error)
+	// AddAttempt увеличивает счётчик неверных вводов и возвращает новое значение.
+	AddAttempt(ctx context.Context, tgID int64) (int, error)
+	Delete(ctx context.Context, tgID int64) error
+	// RecordSend записывает отправку в журнал.
+	RecordSend(ctx context.Context, tgID int64, email string, at time.Time) error
+	// CountSends считает отправки с момента since: по аккаунту (tgID != 0), по почте (email != "") или все (оба пустые).
+	CountSends(ctx context.Context, tgID int64, email string, since time.Time) (int, error)
+	// OldestSend самая ранняя отправка с момента since по тем же условиям (нулевое время, если нет).
+	OldestSend(ctx context.Context, tgID int64, email string, since time.Time) (time.Time, error)
+	// Purge удаляет просроченные коды и записи журнала старше before.
+	Purge(ctx context.Context, now, before time.Time) error
 }
 
 // InviteRepo работа с инвайтами.
@@ -224,6 +247,7 @@ type ExportRow struct {
 	Operator   string
 	Version    int
 	Kind       domain.TaskKind // тип сценария (покупатель или продавец)
+	Email      string          // почта исполнителя (пусто, если вход был по инвайту)
 	Status     domain.TaskStatus
 
 	CreatedAt, SentAt, AcceptedAt, DueAt, DeclinedAt, ReportedAt, ReviewedAt time.Time
@@ -265,6 +289,7 @@ type Repos struct {
 	Reminders ReminderRepo
 	Stats     StatsRepo
 	Items     ItemRepo
+	OTP       OTPRepo
 }
 
 // Store хранилище: репозитории + транзакции.

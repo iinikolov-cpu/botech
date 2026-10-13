@@ -224,12 +224,12 @@ var compTitle = map[domain.CompStatus]string{
 // TasksCSV все задания периода: роль, Telegram ID, статусы, даты этапов, напоминания, айтем, промокод, компенсация.
 func (a *Analytics) TasksCSV(rows []storage.ExportRow) []byte {
 	w, buf := newCSV()
-	_ = w.Write([]string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Оператор", "Сценарий", "Версия сценария", "Статус",
+	_ = w.Write([]string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Почта", "Оператор", "Сценарий", "Версия сценария", "Статус",
 		"Создано", "Отправлено", "Принято", "Срок до", "Отчёт", "Проверено", "Версий отчёта", "После срока", "Решение по отчёту",
 		"Напоминаний", "Айтем", "Ссылка на айтем", "Промокод", "Сумма компенсации", "Статус компенсации", "Выплачено"})
 	for _, r := range rows {
 		_ = w.Write([]string{
-			strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username),
+			strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username), safe(r.Email),
 			safe(r.Operator), safe(r.Title), strconv.Itoa(r.Version), r.Status.Title(),
 			a.when(r.CreatedAt), a.when(r.SentAt), a.when(r.AcceptedAt), a.when(r.DueAt), a.when(r.ReportedAt), a.when(r.ReviewedAt),
 			optInt(r.Revision), yesNo(r.Late), decisionTitle(r.Decision),
@@ -329,7 +329,7 @@ func (a *Analytics) AnswersCSV(ctx context.Context, rows []storage.ExportRow) ([
 	}
 
 	w, buf := newCSV()
-	head := []string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Оператор", "Сценарий", "Версия сценария", "Статус",
+	head := []string{"№ задания", "Роль", "Telegram ID", "Имя", "Username", "Почта", "Оператор", "Сценарий", "Версия сценария", "Статус",
 		"После срока", "Дата отчёта", "Версия отчёта", "Айтем", "Ссылка на айтем"}
 	for _, c := range cols {
 		h := c.scenario + " / " + c.key
@@ -343,7 +343,7 @@ func (a *Analytics) AnswersCSV(ctx context.Context, rows []storage.ExportRow) ([
 
 	bot := a.botName()
 	for _, r := range reported {
-		rec := []string{strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username),
+		rec := []string{strconv.FormatInt(r.TaskID, 10), kindTitle(r.Kind), strconv.FormatInt(r.UserID, 10), safe(r.UserName), safe(r.Username), safe(r.Email),
 			safe(r.Operator), safe(r.Key), strconv.Itoa(r.Version), r.Status.Title(),
 			yesNo(r.Late), a.when(r.ReportedAt), strconv.Itoa(r.Revision), safe(r.ItemTitle), safe(r.ItemURL)}
 		cells := make([]string, len(cols))

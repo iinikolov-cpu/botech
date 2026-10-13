@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseMinutes(t *testing.T) {
@@ -98,5 +99,65 @@ func TestLoadPromoMaxUses(t *testing.T) {
 	t.Setenv("PROMO_MAX_USES", "0")
 	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "PROMO_MAX_USES") {
 		t.Fatalf("ноль должен давать ошибку с именем переменной: %v", err)
+	}
+}
+
+func TestParseDomains(t *testing.T) {
+	got, err := ParseDomains(" Dila-Team.com, @listee-team.com ;dila-team.com")
+	if err != nil || !reflect.DeepEqual(got, []string{"dila-team.com", "listee-team.com"}) {
+		t.Fatalf("домены: %v %v", got, err)
+	}
+	for _, bad := range []string{"", "   ", "localhost", "a b.com", "-x.com", "x..com", "http://dila-team.com"} {
+		if _, err := ParseDomains(bad); err == nil {
+			t.Errorf("ParseDomains(%q) должен давать ошибку", bad)
+		}
+	}
+}
+
+func TestLoadAuth(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "1:x")
+	t.Setenv("FIRST_ADMIN_ID", "5")
+	c, err := Load()
+	if err != nil || c.AuthMode != AuthInvite || c.AuthOTPTTL != 300*time.Second ||
+		!reflect.DeepEqual(c.AuthEmailDomains, []string{"dila-team.com", "listee-team.com"}) || c.SMTP.Port != 587 || c.SMTP.Security != "starttls" {
+		t.Fatalf("по умолчанию: %v %+v", err, c)
+	}
+	// Режим email требует настроек почты.
+	t.Setenv("AUTH_MODE", "email")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SMTP_HOST") {
+		t.Fatalf("без SMTP: %v", err)
+	}
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("SMTP_FROM", "Бот <bot@dila-team.com>")
+	t.Setenv("SMTP_USER", "bot@dila-team.com")
+	t.Setenv("SMTP_PASSWORD", "secret")
+	t.Setenv("AUTH_OTP_TTL_SECONDS", "120")
+	c, err = Load()
+	if err != nil || c.AuthMode != AuthEmail || c.AuthOTPTTL != 120*time.Second || c.SMTP.Host != "smtp.example.com" || c.SMTP.Password != "secret" {
+		t.Fatalf("режим email: %v %+v", err, c)
+	}
+	t.Setenv("SMTP_SECURITY", "tls")
+	if c, _ = Load(); c.SMTP.Port != 465 {
+		t.Fatalf("для tls порт по умолчанию 465: %d", c.SMTP.Port)
+	}
+	for k, v := range map[string]string{
+		"AUTH_MODE": "password", "AUTH_OTP_TTL_SECONDS": "10", "SMTP_SECURITY": "ssl", "SMTP_PORT": "99999", "SMTP_FROM": "не адрес", "AUTH_EMAIL_DOMAINS": "мусор",
+	} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv("AUTH_MODE", "email")
+			t.Setenv("SMTP_SECURITY", "starttls")
+			t.Setenv("AUTH_OTP_TTL_SECONDS", "300")
+			t.Setenv("SMTP_FROM", "bot@dila-team.com")
+			t.Setenv(k, v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q должно давать ошибку", k, v)
+			}
+		})
+	}
+	// В режиме по инвайтам настройки почты не нужны.
+	t.Setenv("AUTH_MODE", "invite")
+	t.Setenv("SMTP_HOST", "")
+	if _, err := Load(); err != nil {
+		t.Fatalf("invite без SMTP: %v", err)
 	}
 }

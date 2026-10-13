@@ -37,7 +37,7 @@ func (r *statsRepo) Export(ctx context.Context, f storage.ExportFilter) ([]stora
 		cond = "WHERE " + strings.Join(where, " AND ")
 	}
 	rows, err := r.q.QueryContext(ctx, `
-SELECT t.id, t.user_id, u.first_name, u.username,
+SELECT t.id, t.user_id, u.first_name, u.username, u.email,
        t.scenario_id, s.key, s.title, s.operator, sv.version, s.kind, t.status,
        t.created_at, t.sent_at, t.accepted_at, t.due_at, t.declined_at, t.reported_at, t.reviewed_at,
        COALESCE(r.id, 0), COALESCE(r.revision, 0), COALESCE(r.late, 0), COALESCE(r.decision, ''),
@@ -69,7 +69,7 @@ SELECT t.id, t.user_id, u.first_name, u.username,
 			created, sent, accepted, due, declined, reported, reviewed, paid, reportID int64
 			late                                                                       int
 		)
-		if err := rows.Scan(&x.TaskID, &x.UserID, &x.UserName, &x.Username,
+		if err := rows.Scan(&x.TaskID, &x.UserID, &x.UserName, &x.Username, &x.Email,
 			&x.ScenarioID, &x.Key, &x.Title, &x.Operator, &x.Version, &x.Kind, &x.Status,
 			&created, &sent, &accepted, &due, &declined, &reported, &reviewed,
 			&reportID, &x.Revision, &late, &x.Decision,

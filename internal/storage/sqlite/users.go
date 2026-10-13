@@ -12,7 +12,7 @@ import (
 
 type userRepo struct{ q dbtx }
 
-const userCols = `tg_id, role, status, lang, first_name, username, invite_code, kinds, created_at, updated_at`
+const userCols = `tg_id, role, status, lang, first_name, username, invite_code, kinds, email, created_at, updated_at`
 
 func scanUser(sc interface{ Scan(...any) error }) (*domain.User, error) {
 	var (
@@ -21,7 +21,7 @@ func scanUser(sc interface{ Scan(...any) error }) (*domain.User, error) {
 		kinds    string
 		cr, up   int64
 	)
-	if err := sc.Scan(&u.TgID, &role, &st, &u.Lang, &u.FirstName, &u.Username, &u.InviteCode, &kinds, &cr, &up); err != nil {
+	if err := sc.Scan(&u.TgID, &role, &st, &u.Lang, &u.FirstName, &u.Username, &u.InviteCode, &kinds, &u.Email, &cr, &up); err != nil {
 		return nil, err
 	}
 	u.Role, u.Status, u.Kinds = domain.Role(role), domain.UserStatus(st), domain.ParseKinds(kinds)
@@ -39,8 +39,8 @@ func (r *userRepo) Get(ctx context.Context, id int64) (*domain.User, error) {
 
 func (r *userRepo) Create(ctx context.Context, u *domain.User) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO users (`+userCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		u.TgID, u.Role, u.Status, u.Lang, u.FirstName, u.Username, u.InviteCode, domain.JoinKinds(u.Kinds),
+		`INSERT INTO users (`+userCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		u.TgID, u.Role, u.Status, u.Lang, u.FirstName, u.Username, u.InviteCode, domain.JoinKinds(u.Kinds), u.Email,
 		u.CreatedAt.Unix(), u.UpdatedAt.Unix())
 	return err
 }
@@ -142,6 +142,22 @@ func (r *userRepo) CountForKind(ctx context.Context, status domain.UserStatus, k
 	var n int
 	err := r.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE `+cond, args...).Scan(&n)
 	return n, err
+}
+
+func (r *userRepo) ByEmail(ctx context.Context, email string) (*domain.User, error) {
+	if email == "" {
+		return nil, storage.ErrNotFound
+	}
+	u, err := scanUser(r.q.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE email = ?`, email))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, storage.ErrNotFound
+	}
+	return u, err
+}
+
+func (r *userRepo) ClearEmail(ctx context.Context, tgID int64, at time.Time) error {
+	_, err := r.q.ExecContext(ctx, `UPDATE users SET email = '', updated_at = ? WHERE tg_id = ?`, at.Unix(), tgID)
+	return err
 }
 
 func (r *userRepo) ListActiveAdmins(ctx context.Context) ([]*domain.User, error) {

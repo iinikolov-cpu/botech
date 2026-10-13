@@ -129,3 +129,13 @@ func (a *App) eat(ctx context.Context, b *bot.Bot, m *models.Message) {
 	}
 	a.deleteMsgs(ctx, b, m.Chat.ID, []int{m.ID})
 }
+
+// deleteKeyed удаляет сообщение, запомненное под ключом (если оно есть).
+func (a *App) deleteKeyed(ctx context.Context, b *bot.Bot, chat int64, key string) {
+	a.panels.mu.Lock()
+	c := a.panels.get(chat)
+	id := c.keyed[key]
+	delete(c.keyed, key)
+	a.panels.mu.Unlock()
+	a.deleteMsgs(ctx, b, chat, []int{id})
+}

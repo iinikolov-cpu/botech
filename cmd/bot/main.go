@@ -16,6 +16,7 @@ import (
 
 	"botech/internal/config"
 	"botech/internal/handlers"
+	"botech/internal/mailer"
 	"botech/internal/scheduler"
 	"botech/internal/service"
 	"botech/internal/storage/sqlite"
@@ -74,6 +75,13 @@ func run() error {
 
 		BackupChatID: cfg.FirstAdminID,
 	}, log, cfg.Location)
+	if cfg.AuthMode == config.AuthEmail {
+		app.UseEmailAuth(service.NewEmailAuth(store, mailer.NewSMTP(mailer.Config{
+			Host: cfg.SMTP.Host, Port: cfg.SMTP.Port, User: cfg.SMTP.User, Password: cfg.SMTP.Password,
+			From: cfg.SMTP.From, Security: cfg.SMTP.Security,
+		}), cfg.AuthEmailDomains, cfg.AuthOTPTTL))
+	}
+	log.Info("режим входа", "mode", cfg.AuthMode)
 	b, err := bot.New(cfg.BotToken,
 		bot.WithMiddlewares(app.Middleware),
 		bot.WithDefaultHandler(app.DefaultHandler),

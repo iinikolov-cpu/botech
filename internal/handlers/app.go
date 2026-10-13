@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"botech/internal/config"
 	"botech/internal/domain"
 	"botech/internal/i18n"
 	"botech/internal/service"
@@ -29,6 +30,8 @@ type Services struct {
 	Settings  *service.Settings
 	Backups   *service.Backups
 	Analytics *service.Analytics
+	EmailAuth *service.EmailAuth // нужен только при AuthMode == config.AuthEmail
+	AuthMode  string             // config.AuthInvite или config.AuthEmail
 	Items     *service.Items
 
 	BackupChatID int64 // кому отправлять ежедневную копию базы (первый админ)
@@ -46,6 +49,8 @@ type App struct {
 	settings    *service.Settings
 	backups     *service.Backups
 	analytics   *service.Analytics
+	emailAuth   *service.EmailAuth
+	authMode    string
 	items       *service.Items
 	backupChat  int64
 	log         *slog.Logger
@@ -64,11 +69,17 @@ type App struct {
 func New(svc Services, log *slog.Logger, loc *time.Location) *App {
 	return &App{
 		access: svc.Access, scenarios: svc.Scenarios, tasks: svc.Tasks, dialog: svc.Dialog,
-		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, analytics: svc.Analytics, items: svc.Items, backupChat: svc.BackupChatID, log: log, loc: loc,
+		promos: svc.Promos, reports: svc.Reports, reminders: svc.Reminders, settings: svc.Settings, backups: svc.Backups, analytics: svc.Analytics, emailAuth: svc.EmailAuth, authMode: svc.AuthMode, items: svc.Items, backupChat: svc.BackupChatID, log: log, loc: loc,
 		panels:     newPanelStore(),
 		badInvites: newLimiter(5, time.Hour),
 		noAccess:   newLimiter(1, 30*time.Second),
 	}
+}
+
+// UseEmailAuth включает вход по почте: незнакомые пользователи подтверждают почту кодом вместо инвайта.
+// Уже зарегистрированные пользователи не затрагиваются.
+func (a *App) UseEmailAuth(ea *service.EmailAuth) {
+	a.emailAuth, a.authMode = ea, config.AuthEmail
 }
 
 // Register регистрирует маршруты. Имена команд задаются БЕЗ слеша (так требует библиотека). Middleware доступа подключается отдельно (Middleware()).
@@ -260,6 +271,10 @@ func codeFromText(text string) string {
 func (a *App) handleStranger(ctx context.Context, b *bot.Bot, upd *models.Update, from *models.User, chatID int64, text string) {
 	if upd.CallbackQuery != nil {
 		a.answerCB(ctx, b, upd.CallbackQuery.ID, i18n.T(i18n.RU, "no_access"), true)
+		return
+	}
+	if a.authMode == config.AuthEmail && a.emailAuth != nil {
+		a.handleEmailAuth(ctx, b, upd, from, chatID, text)
 		return
 	}
 	code := codeFromText(text)

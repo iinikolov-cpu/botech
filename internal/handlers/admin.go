@@ -11,6 +11,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"botech/internal/config"
 	"botech/internal/domain"
 	"botech/internal/service"
 )
@@ -230,6 +231,9 @@ func (a *App) screenUser(ctx context.Context, id int64) (string, *models.InlineK
 		userLabel(u), statusTitle[u.Status], a.fmtTime(u.CreatedAt))
 	if u.Role == domain.RoleBuyer {
 		text += "\nТипы заданий: " + u.KindsTitle()
+		if u.Email != "" {
+			text += "\nПочта: " + esc(u.Email)
+		}
 	}
 	var actions []models.InlineKeyboardButton
 	if u.Role == domain.RoleBuyer {
@@ -280,6 +284,9 @@ func (a *App) screenInvites(ctx context.Context) (string, *models.InlineKeyboard
 	}
 	var sb strings.Builder
 	sb.WriteString("<b>Инвайты</b>\nСсылка действует 7 дней. Пользователь входит по ссылке или отправляет боту код.\n")
+	if a.authMode == config.AuthEmail {
+		sb.WriteString("\n⚠ Сейчас включён вход по почте (AUTH_MODE=email): новые пользователи по инвайтам не входят, они подтверждают рабочую почту кодом из письма.\n")
+	}
 	rows := [][]models.InlineKeyboardButton{
 		row(btn("➕ На 1 чел.", "adm:invn:1"), btn("➕ На 5", "adm:invn:5"), btn("➕ На 20", "adm:invn:20")),
 	}

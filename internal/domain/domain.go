@@ -87,6 +87,7 @@ type User struct {
 	Username   string
 	InviteCode string
 	Kinds      []TaskKind // какие типы заданий готов делать; пусто, пока не выбрал
+	Email      string     // почта сотрудника (вход по почте); пусто при входе по инвайту
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
